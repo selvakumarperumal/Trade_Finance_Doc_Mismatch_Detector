@@ -19,6 +19,52 @@ and comes out*. Skim the prose, read the code, check the data.
 
 ---
 
+## In plain English, before any code
+
+The same run as the rest of this file, with the code taken out. Skip it if the stage names below
+already mean something to you.
+
+**The situation.** A seller in India shipped t-shirts to a buyer in Singapore. The buyer's bank
+promised to pay — *if* the seller hands over paperwork matching the credit exactly. Banks pay against
+**documents, not goods**: if the paper disagrees with the credit the bank refuses, even when the
+shipment plainly happened. A clerk normally checks this by hand, field by field. This project is the
+clerk.
+
+**What goes in.** Three documents as plain text — the credit, the invoice, the bill of lading — plus
+the date they reached the bank (2026-03-02). No OCR here; turning PDFs into text is your job.
+
+**What the machine does, in five moves.**
+
+| # | Move | In plain words |
+|---|---|---|
+| 1 | `ingest` | Is there anything to work with? An empty case stops here, before spending a single model call. |
+| 2 | fan out | Split into one lane per document. The three lanes then run at the same time. |
+| 3 | `classify` → route | *"What am I looking at?"* — then hand it to the specialist for that family. |
+| 4 | `extract` | The specialist fills in a form: text ➜ typed fields, real `Decimal`s and `date`s, never strings. |
+| 5 | `reconcile` | The lanes rejoin. One model reads the tidy fields side by side and lists what disagrees. |
+
+**Why not one big prompt?** A model asked to read messy OCR *and* judge compliance at the same time
+does both slightly badly. Extraction is form-filling; reconciliation is judgement. Split apart, the
+hard step gets to read a clean table instead of raw scan noise.
+
+**What comes out.** Three genuine problems and one trap:
+
+| What it found | Severity |
+|---|---|
+| Invoice is USD 268,400 against a USD 250,000 credit — over the ceiling even with the stated 5% tolerance | critical |
+| Shipped 2026-02-24, four days past the latest shipment date | critical |
+| Discharge port is Port Klang, Malaysia; the credit says Singapore | critical |
+| Goods worded differently on the bill of lading than on the credit — permitted, so **not** a discrepancy | info |
+
+Verdict: **`blocked`**.
+
+**The one design idea to carry into the code below.** The model *finds* discrepancies, but it never
+gets the last word. The money and date arithmetic is done in plain Python ([§8](#8-reconcile)), and
+the final verdict is a rule rather than an opinion ([§9](#9-the-status-rule)): a report that lists a
+critical finding while claiming `clean` comes back `blocked`, every time.
+
+---
+
 ## Contents
 
 | | Stage | What it does |
@@ -718,7 +764,8 @@ is a compliance failure.
 is how you refuse a compliant presentation for being $0.000001 over.
 
 The `kind` field is a single-valued `Literal` with a default, so **the model can only ever emit the
-correct tag.** That tag is what makes the payload union round-trip through JSON:
+correct tag.** That tag is what makes the payload union round-trip through JSON — the next subsection
+takes that apart slowly:
 
 ```python
 ExtractionPayload = Annotated[
@@ -747,6 +794,127 @@ EXTRACTION_PAYLOAD_TYPES: dict[DocumentType, type[ExtractionBase]] = {
 }
 """Maps a classified document type to the payload the extractor must return."""
 ```
+
+### `ExtractionPayload`, step by step
+
+That `Annotated[...]` block is the one piece of type machinery here that isn't obvious on sight. Read
+it in five steps.
+
+**Step 1 — the problem.** When a document finishes its branch it becomes an `ExtractedDocument`,
+which has to carry whatever was pulled out of it. What type is that field?
+
+```python
+class ExtractedDocument(BaseModel):
+    document_id: str
+    payload: ???        # LetterOfCredit? CommercialInvoice? BillOfLading? …
+```
+
+You can't answer until the run is happening. The eight families share almost no fields:
+
+| `LetterOfCredit` | `CommercialInvoice` | `BillOfLading` |
+|---|---|---|
+| `lc_number` | `invoice_number` | `bl_number` |
+| `credit_amount` | `total_amount` | `shipment_date` |
+| `expiry_date` | `invoice_date` | `vessel_name` |
+
+**Step 2 — the obvious answer isn't enough.** Python's way to say "one of several types" is a plain
+union: `LetterOfCredit | CommercialInvoice | …`. In memory that's fine. It breaks the moment the
+object is written to a database or an HTTP response and read back, because **JSON has no classes** —
+a stored payload is just a bag of keys, and Pydantic has to work out which class to rebuild. Every
+field here is optional, so most classes fit most bags. Give it two same-shaped classes and no tag,
+and it does not raise, it *guesses*:
+
+```
+in  : {'reference': 'INV-4471', 'amount': '268400.00'}   # this row came off an invoice
+out : LooksLikeACredit  <- wrong class, and nothing raised
+```
+
+A silent wrong answer: every later check reading `payload.credit_amount` is now reading an invoice
+total.
+
+**Step 3 — the fix: write the answer into the data.** Every payload class carries one field whose
+only job is to say what it is:
+
+```python
+kind: Literal[DocumentType.COMMERCIAL_INVOICE] = DocumentType.COMMERCIAL_INVOICE
+```
+
+Read it as: ***`kind` is allowed exactly one value, and it is already filled in.*** `Literal[...]`
+with a single member makes every other value illegal; the default means you never set it by hand and
+**the model is never offered the choice** — in the JSON schema it appears as
+`{'const': 'commercial_invoice', 'default': 'commercial_invoice'}`. A field used this way is called a
+**discriminator**: the thing that tells the alternatives apart.
+
+**Step 4 — `ExtractionPayload` is those two facts, named.**
+
+```python
+ExtractionPayload = Annotated[
+    LetterOfCredit | CommercialInvoice | …,   # (1) the choices
+    Field(discriminator='kind'),              # (2) how to choose
+]
+```
+
+One English sentence: **"one of these eight — read `kind` to know which."** `Annotated[X, Y]` creates
+no new type; it is `X` with a note `Y` stapled on for tools that care.
+
+| Part | What it says |
+|---|---|
+| the `\|` union | the value is one of these eight classes |
+| `Field(discriminator='kind')` | to tell them apart, look at `kind` — never guess |
+
+To a type checker, `ExtractionPayload` is just the eight-way union. To Pydantic it is a **tagged
+union**, and Step 2's guessing is gone.
+
+Two names, opposite directions — worth not mixing up:
+
+| | Direction | Used when |
+|---|---|---|
+| `ExtractionPayload` | `kind` string ➜ class | rebuilding a payload **out of** JSON |
+| `EXTRACTION_PAYLOAD_TYPES` | `DocumentType` ➜ class | picking which agent and schema to run **before** extraction |
+
+**Step 5 — in → out.** Four cases, captured from a real run:
+
+```python
+>>> adapter = TypeAdapter(ExtractionPayload)
+```
+
+*A — one dict in, the right class out:*
+
+```
+in  : {'kind': 'commercial_invoice', 'invoice_number': 'INV-4471',
+       'total_amount': '268400.00', 'invoice_date': '2026-02-18'}
+out : CommercialInvoice
+      total_amount = Decimal('268400.00')      <- Decimal, not a string
+      invoice_date = datetime.date(2026, 2, 18) <- a real date
+```
+
+*B — object → JSON → object, unchanged:*
+
+```
+json: {"kind":"commercial_invoice","invoice_number":"INV-4471","invoice_date":"2026-02-18",…}
+back: CommercialInvoice | equal to the original? True
+```
+
+*C — a tag that isn't one of ours:*
+
+```
+Input tag 'freight_note' found using 'kind' does not match any of the expected tags: …
+```
+
+*D — no tag at all:*
+
+```
+Unable to extract tag using discriminator 'kind'
+```
+
+**Where it's used — and where it isn't.** One place: `ExtractedDocument.payload`, below. Note where
+it is *not*: each extraction agent gets one **concrete** class as its `output_type`, never the union,
+because by the time an agent runs the routing decision has already fixed the family. The union exists
+for the payload's life **after** extraction — inside `ExtractedDocument`, through the API response
+and the database row, and back out a `CommercialInvoice` rather than a `dict`.
+
+> **In one line:** `ExtractionPayload` = *"one of the eight payload classes, and `kind` says which."*
+> `kind` is fixed by the class, not chosen by the model, so it is always right.
 
 ### The agents — `Detector/services/agents.py`
 
