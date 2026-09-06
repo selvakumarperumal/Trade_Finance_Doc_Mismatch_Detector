@@ -19,6 +19,15 @@ from Detector.services.pipeline import get_pipeline
 result = await get_pipeline().run(case_input)
 ```
 
+**If a construct here is hard going, read it somewhere else first.** This file is a
+reference — it explains each piece where it lives, and assumes you want the detail.
+The other two docs approach the same code from easier angles:
+
+| Doc | What it's for |
+|---|---|
+| [`../WALKTHROUGH.md`](../WALKTHROUGH.md) | One real case followed end to end, with plain-English on-ramps and the data at every stage |
+| [`../mini_detector.ipynb`](../mini_detector.ipynb) | A runnable miniature you can execute offline, built from scratch |
+
 ---
 
 ## 1. The shape of a run
@@ -148,6 +157,10 @@ Two settings doing real work:
 Every field is `| None = None`. That is deliberate and matches the prompt in
 `Config/prompts.yaml` ("leave it null rather than guessing"). A missing field is
 evidence in its own right; a hallucinated one is a compliance failure.
+
+**In one line:** `ExtractionPayload` means *"one of the eight payload classes, and
+`kind` says which."* If that isn't obvious yet, `WALKTHROUGH.md` §6 takes it apart in
+five steps with runnable input/output.
 
 Each payload carries a literal tag:
 
@@ -551,7 +564,10 @@ yields its initial value (an empty list) and reconciliation proceeds to report
 
 ### 7.4 The routing decision
 
-This is the part worth reading twice.
+This is the part worth reading twice. **In one line:** the nine empty subclasses exist
+so that forgetting to wire up a new document family is a *type error* rather than a
+silent fall-through in production. `WALKTHROUGH.md` §5 walks the reasoning in five
+steps; the summary is below.
 
 ```python
 def _routing_decision() -> Decision[CaseState, DetectorDeps, RoutedDocuments]:

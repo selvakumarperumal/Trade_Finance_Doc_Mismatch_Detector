@@ -67,15 +67,19 @@ critical finding while claiming `clean` comes back `blocked`, every time.
 
 ## Contents
 
+Every numbered stage opens with an **In plain words** block — the idea with no code in it — before
+the code and the data. If a section is heavy going, that block is the part to read.
+
 | | Stage | What it does |
 |---|---|---|
+| [—](#in-plain-english-before-any-code) | — | **The whole run, no code — start here** |
 | [0](#0-the-papers) | — | The three documents |
 | [1](#1-what-you-hand-in) | — | `CaseInput` |
 | [2](#2-ingest) | `ingest` | Validate, or refuse to start |
 | [3](#3-the-fan-out) | fork | One branch per document |
 | [4](#4-classify) | `classify` | What kind of document is this? |
-| [5](#5-route) | decision | Pick the extractor |
-| [6](#6-extract) | `extract_*` | Text → typed fields |
+| [5](#5-route) | decision | Pick the extractor — *and why nine empty classes* |
+| [6](#6-extract) | `extract_*` | Text → typed fields — *and `ExtractionPayload`, step by step* |
 | [7](#7-the-join) | join | Wait for all branches |
 | [8](#8-reconcile) | `reconcile` | Cross-check everything |
 | [9](#9-the-status-rule) | — | Findings → verdict |
@@ -147,6 +151,11 @@ Three real problems and one red herring are hiding in there.
 
 **What happens:** you turn PDFs into text (the package does no OCR), wrap them in models, and make
 one call.
+
+**In plain words.** This package starts where the PDF ends — you do the OCR, it takes text. Put each
+document's text in a `RawDocument`, drop them all into a `CaseInput` along with the date the bank
+received them, and call `run()` once. That is the entire public surface: one function, one object in,
+one report out.
 
 ### The models — `Detector/models/documents.py`
 
@@ -229,6 +238,22 @@ That's the entire public surface. Three things worth knowing:
 **What happens:** the first graph step validates the whole case, then hands the documents to the
 fan-out. Nothing is truncated — oversized input is rejected.
 
+**In plain words.** The doorman. Before a single model call gets paid for, it asks three questions of
+the case, and refuses the whole thing if any answer is wrong. Everything downstream is then free to
+assume its input is sane.
+
+| Check | Refuses when | Why not just fix it quietly? |
+|---|---|---|
+| how many documents | above `max_documents_per_case` | a runaway upload shouldn't silently cost 200 model calls |
+| how long each one is | above `max_document_chars` | see below — this is the dangerous one |
+| whether there's any text | `text` is blank after stripping | there is nothing to classify, and a blank page "extracts" as all-nulls |
+
+The middle one is worth dwelling on. A letter of credit cut off halfway **still extracts
+successfully** — it just quietly loses whichever terms fell off the end, and reconciliation then finds
+nothing wrong with a presentation that actually breaks them. Truncation doesn't produce an error, it
+produces a *confident wrong answer*, which is the most expensive thing this system could do. Failing
+loudly at the door is the cheapest outcome on the menu.
+
 ### The code — `Detector/services/graph.py`
 
 ```python
@@ -288,6 +313,14 @@ Returning a `list` is what sets up the next step.
 
 **What happens:** the list splits into one concurrent branch per document.
 
+**In plain words.** One clerk reading three documents in turn is slower than three clerks reading one
+each. `.map()` is what hires the three clerks: it takes the list `ingest` returned and starts a
+separate, independent lane for each element in it.
+
+The step signatures are the tell. `ingest` returns `list[RawDocument]` (plural), but `classify` is
+declared as taking a single `RawDocument` — because by the time `classify` runs, the list has already
+been split up and each lane is holding one item.
+
 ### The code — `Detector/services/graph.py`
 
 ```python
@@ -315,12 +348,35 @@ documents would fan out to nothing and the join would wait forever. With it, the
 to the join, which yields its empty initial value and reconciliation reports "no documents
 presented".
 
+### In → Out
+
+```
+in : [RawDocument, RawDocument, RawDocument]       # one list, from ingest
+out: 3 independent branches, one RawDocument each  # all running at the same time
+```
+
+Nothing is computed here. The fan-out is pure control flow — it changes *how many things are
+happening*, not what any of them are.
+
 ---
 
 ## 4. `classify`
 
 **What happens:** each branch asks the model which document family it's holding. Runs three times, in
 parallel.
+
+**In plain words.** Every lane opens with the same question: *"what am I holding?"* The answer decides
+which form gets filled in at the next step, so it has to be settled first. It's a deliberately small,
+cheap call — all it has to do is pick one label out of nine, not read anything closely.
+
+Four things happen to one document here, in order:
+
+| # | Move | What it means |
+|---|---|---|
+| 1 | build the prompt | the document's text wrapped in `<document_text>` tags, with its id and filename above |
+| 2 | ask the agent | a model + a system prompt + `output_type=Classification` |
+| 3 | check the answer | Pydantic validates the shape; confidence under the threshold is downgraded to `unknown` |
+| 4 | wrap it up | put it in the envelope class for that family — which is what §5 routes on |
 
 ### The agent — `Detector/services/agents.py`
 
@@ -560,6 +616,83 @@ between 0 and 1 because the schema said so and Pydantic checked.
 **What happens:** the classified document is dispatched to the right extractor — by type, not by
 string comparison.
 
+**In plain words.** The classifier said "letter of credit". Something now has to send this document to
+the LC extractor and not the invoice one. This section is that switchboard — and it is built so that
+**adding a document family and forgetting to wire it up is a type error, not a bug you meet in
+production.** That single goal explains everything odd-looking below.
+
+#### Step 1 — the version almost every codebase would write
+
+```python
+if doc.classification.document_type == DocumentType.LETTER_OF_CREDIT:
+    return extract_lc
+elif doc.classification.document_type == DocumentType.COMMERCIAL_INVOICE:
+    return extract_invoice
+elif ...
+```
+
+This works. It has exactly one flaw: **nothing checks that the chain is complete.** Add a ninth family
+next year, forget one `elif`, and nothing objects — not your editor, not the type checker, not a test
+you didn't think to write. You find out when a real packing list falls off the end of the chain, in
+front of a customer.
+
+Nothing *can* check it, either, and the reason is worth naming: `document_type` is a **value**. Values
+get compared while the program runs, so a type checker has no way to see which ones you covered.
+
+#### Step 2 — make the family a *type* instead of a value
+
+So `classify` doesn't hand on a `RoutedDocument` carrying a string. It hands on **one of nine
+classes**, one per family, each of which adds nothing whatsoever:
+
+```python
+@dataclass(frozen=True, slots=True)
+class LetterOfCreditDoc(RoutedDocument):
+    """Routed to the LC extractor."""      # <- the docstring is the entire body
+```
+
+Nine classes, nine empty bodies, no new fields between them. Their **only** job is to be nine
+*different types* — and then to be named together as one:
+
+```python
+type RoutedDocuments = LetterOfCreditDoc | CommercialInvoiceDoc | ... | UnclassifiedDoc
+```
+
+#### Step 3 — dispatch on the type
+
+```python
+.branch(builder.match(LetterOfCreditDoc).to(extract_letter_of_credit))
+```
+
+`builder.match(SomeClass)` is an `isinstance` test rather than a string comparison. The behaviour at
+runtime is the same as the `if` chain — but now every branch names a *type*.
+
+#### Step 4 — and that is what makes the difference
+
+`Decision` accumulates the types it has handled in a type parameter, branch by branch. So writing this
+return annotation:
+
+```python
+def _routing_decision() -> Decision[CaseState, DetectorDeps, RoutedDocuments]:
+```
+
+is an **assertion that the branch table covers the whole union**. Miss a family and the accumulated
+type is narrower than `RoutedDocuments`, the annotation stops holding, and the type checker says so —
+before anything runs.
+
+| | `if` on a string | `match` on a type |
+|---|---|---|
+| you forget a family | silent fall-through | the annotation fails |
+| when you find out | a customer's presentation, in production | in your editor, before the commit |
+
+That guarantee is the entire return on nine otherwise-pointless classes.
+
+#### Step 5 — why frozen dataclasses and not Pydantic models
+
+These envelopes live for the few milliseconds between `classify` and `extract` and never cross a
+process boundary, so they need no validation, no JSON schema and no serialisation. `frozen=True` makes
+them immutable, `slots=True` drops the per-instance dict. They're the cheapest object that can carry a
+type.
+
 ### The envelopes — `Detector/models/documents.py`
 
 ```python
@@ -683,20 +816,11 @@ def _routing_decision() -> Decision[CaseState, DetectorDeps, RoutedDocuments]:
     )
 ```
 
-**Why bother, when an `if` on `document_type` would work?**
+Nine branches, one per member of `RoutedDocuments` — and the return annotation on the function is
+what forces it to stay that way. That is Steps 3 and 4 above, in the actual code.
 
-```python
-# the version this code deliberately does NOT use:
-if doc.classification.document_type == DocumentType.LETTER_OF_CREDIT:
-    return extract_lc
-elif ...
-# add a 9th family, forget a branch → falls through silently, at runtime, in production
-```
-
-The `Decision` type accumulates the types it has handled in its third type parameter. Declaring the
-return as `Decision[..., RoutedDocuments]` **asserts the branch table covers the entire union** — so
-forgetting a family is a type error your checker catches before you run anything. That guarantee is
-what the nine otherwise-pointless classes buy.
+Note that `skip_unclassified` is a branch like any other. "We couldn't read this" is a route, not an
+error, which is why an unreadable document still reaches the join and still appears in the report.
 
 ### In → Out
 
@@ -711,6 +835,22 @@ out: dispatched to the extract_letter_of_credit step
 
 **What happens:** each family's own agent turns document text into typed fields. Three times, in
 parallel.
+
+**In plain words.** Filling in a form. Routing already decided which form — now the specialist for
+that family reads the document and writes each value into a named, typed box. Text goes in;
+`Decimal('250000.00')` and `date(2026, 3, 15)` come out.
+
+The one instruction that matters: **leave it blank rather than guess.** Every field can legally be
+empty, so "the credit doesn't state a tolerance" is a real answer the model is allowed to give. A
+blank field is evidence the next stage can reason about; an invented one is a compliance failure
+nobody will catch.
+
+Two things carry the weight here, and neither is the prompt:
+
+| | Does what |
+|---|---|
+| the payload class | tells the model every field name, type and description — *the schema is the prompt* |
+| `ExtractionPayload` | lets that filled-in form survive the trip to JSON and back — taken apart below |
 
 ### The output type — `Detector/models/extractions.py`
 
@@ -1133,6 +1273,18 @@ is why the amount check downstream is a single subtraction.
 **What happens:** all branches are gathered back into one list. This is the only barrier in the
 graph.
 
+**In plain words.** The three lanes set off together but finish at different times. The join is the
+desk they each hand their finished form to; when the last one arrives, the whole pile moves on as a
+single list.
+
+Two consequences worth carrying forward:
+
+- **Results arrive in completion order, not the order you submitted them.** doc-bol may well come back
+  before doc-lc. That is why every finding keys on `document_id` and never on a position in a list.
+- **Every lane has to arrive — including the ones with nothing to do.** An unclassified document has
+  no extractor to visit, so `skip_unclassified` exists purely to walk it to the join. Delete it and
+  the join waits forever for a branch that never reports, and the case hangs.
+
 ### The code — `Detector/services/graph.py`
 
 ```python
@@ -1200,6 +1352,24 @@ out: [ExtractedDocument, ExtractedDocument, ExtractedDocument]
 
 **What happens:** one model call over all the documents at once. This is where discrepancies are
 found.
+
+**In plain words.** Everything up to now was preparation. This is the actual job: one model call that
+sees every document's typed fields laid out side by side, and is asked what disagrees.
+
+Five moves:
+
+| # | Move | What it means |
+|---|---|---|
+| 1 | gather | each `ExtractedDocument`'s payload becomes one `<document>` block of evidence |
+| 2 | frame | add the case id, the presentation date, and any operator notes |
+| 3 | instruct | "use the tools for every date and amount comparison — don't compute them yourself" |
+| 4 | reason | the model reads the table, spots what disagrees, and calls the tools to check the numbers |
+| 5 | validate | the reply is forced into a `ReconciliationReport` — and then §9 overrides its verdict |
+
+**Why XML here, when everything else is JSON?** The evidence is a stack of nested records the model
+has to *read*, not parse. Tagged blocks keep every field name pressed against its value at every level
+of nesting, so `<port_of_discharge>Singapore</port_of_discharge>` stays unambiguous three documents
+deep — and a field that is absent is visibly absent, rather than a `null` sitting in a list of commas.
 
 ### Building the evidence — `Detector/services/graph.py`
 
@@ -1340,6 +1510,21 @@ reconciliation_engine: |
 
 Date and money maths is exactly where language models are subtly and confidently wrong, and exactly
 where being wrong costs the beneficiary a refusal. So four pure functions are registered as tools:
+
+**In plain words.** The model is good at *noticing* that an invoice amount and a credit amount ought to
+be compared. It is not reliable at doing the comparison. "268,400 against 250,000 with a 5% tolerance"
+is three operations, and a model that gets one of them slightly wrong writes a confident, wrong,
+impossible-to-falsify sentence. So the noticing stays with the model and the arithmetic moves into
+Python:
+
+| The model decides | Python computes |
+|---|---|
+| *these two amounts should be compared, and the credit states 5%* | `250000 × 1.05 = 262500`; `268400 − 262500 = 5900` → over |
+| *this shipment date should be checked against that deadline* | `2026-02-24` vs `2026-02-20` → 4 days late |
+
+Each tool hands back a ready-made sentence in `detail`, and the prompt tells the model to quote the
+figures it returns. So every number in the finished report was produced by `Decimal` arithmetic — not
+generated as text and hoped about.
 
 ```python
 class ToolVerdict(BaseModel):
@@ -1707,6 +1892,22 @@ out: CaseResult(status=BLOCKED, report=ReconciliationReport(...), documents=[...
 
 **What happens:** the code throws away the model's verdict and derives its own.
 
+**In plain words.** The model is asked for a verdict, and then the code ignores its answer and works
+the verdict out itself. Not because the model is usually wrong — but because "is this blocked?" is a
+lookup, not an opinion, and a lookup should never be left to something capable of having an off day.
+
+The entire rule:
+
+| If the findings contain… | Verdict |
+|---|---|
+| any `critical` | `blocked` |
+| otherwise, any `warning` | `needs_review` |
+| otherwise | `clean` |
+
+Three lines of Python, and the most load-bearing function in the project. It is the difference between
+a system whose worst case is *"flagged something it needn't have"* and one whose worst case is
+*"told a bank that a discrepant presentation was clean"*.
+
 ### The code — `Detector/services/graph.py`
 
 ```python
@@ -1795,6 +1996,11 @@ def _no_evidence_report(documents: Sequence[ExtractedDocument]) -> Reconciliatio
 ---
 
 ## 10. The output
+
+**In plain words.** Four findings, sorted worst-first. Three are real problems; the fourth is the trap
+— the one a naive field-by-field comparison would report and be wrong about. Each finding carries the
+field that disagrees, which documents disagree about it, the UCP 600 article it rests on, and what to
+do about it, because "discrepancy found" without a cure is just an obstacle.
 
 ### Finding 1 — the invoice is drawn over the credit · CRITICAL
 
@@ -1894,6 +2100,21 @@ them need the buyer's agreement to amend the credit.
 
 Every step above is wired together here — and validated at **import time**, so a miswired graph fails
 when the module loads rather than on the first request in production.
+
+**In plain words.** None of the steps above wired themselves up. This is where they get connected, and
+it happens as the module loads — so a bad edge (a step nothing feeds, a join with no fork above it)
+blows up at deploy time, not on a customer's first request.
+
+The wiring reads as six sentences:
+
+| The line | In English |
+|---|---|
+| `edge_from(start).to(ingest)` | start at `ingest` |
+| `edge_from(ingest).map(...).to(classify)` | split the list — one `classify` per document |
+| `edge_from(classify).to(_routing_decision())` | send each classified document to the switchboard |
+| `edge_from(*EXTRACTION_STEPS).to(collect)` | every extractor, and the skip step, reports to the join |
+| `edge_from(collect).to(reconcile)` | once all have reported, reconcile the whole pile at once |
+| `edge_from(reconcile).to(end)` | and that report is the result |
 
 ```python
 builder = GraphBuilder(
