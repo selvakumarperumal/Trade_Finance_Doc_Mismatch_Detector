@@ -119,8 +119,6 @@ def _reconciliation_prompt(
             "Date of presentation: not supplied. Do not raise a presentation-period "
             "finding on a date you had to assume."
         )
-    if state.notes:
-        parts.append(f"Operator notes: {state.notes}")
     parts.append(
         "\nUse the deterministic tools for every date and amount comparison rather than "
         "computing them yourself, and quote the figures they return in your findings.\n"

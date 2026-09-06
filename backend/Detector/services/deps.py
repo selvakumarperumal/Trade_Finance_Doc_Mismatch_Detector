@@ -43,9 +43,6 @@ class CaseState:
     presented_on: date | None = None
     """Copied off the case input so the reconciliation step can date the presentation."""
 
-    notes: str | None = None
-    """Free-text context from the ops user, passed through to reconciliation."""
-
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     usage: RunUsage = field(default_factory=RunUsage)
     """Running total across every agent call in the case."""
@@ -56,7 +53,7 @@ class CaseState:
     @classmethod
     def for_case(cls, case: CaseInput) -> CaseState:
         """Open a fresh run state for one presentation."""
-        return cls(case_id=case.case_id, presented_on=case.presented_on, notes=case.notes)
+        return cls(case_id=case.case_id, presented_on=case.presented_on)
 
     def record(
         self,

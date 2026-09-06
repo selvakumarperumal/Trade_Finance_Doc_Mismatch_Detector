@@ -181,9 +181,6 @@ class CaseInput(BaseModel):
     presented_on: date | None = None
     """The date the documents were presented to the bank, when known. Required for
     the UCP 600 Art 14(c) presentation-period check."""
-
-    notes: str | None = None
-    """Free-text context from the ops user, passed to the reconciliation stage."""
 ```
 
 ### The call — `Detector/services/pipeline.py`
@@ -227,10 +224,12 @@ That's the entire public surface. Three things worth knowing:
   completion order, not the order you sent them.
 - **`presented_on` matters.** Without it the presentation-period check can't run, and the prompt
   explicitly tells the model not to guess a date. Leave it out and you silently lose a check.
-- **You don't say what any document is.** There is no "type" field to fill in. The uploader hands over
-  a file and the classifier works it out from the text — which is the only version that survives
-  contact with reality, since a field asking someone to label their own upload gets mislabelled or
-  left blank, and either way it can't be trusted enough to act on.
+- **You describe nothing.** There is no field for saying what a document is, and none for free-text
+  context. The uploader hands over files; everything else is derived from the text. That is the only
+  version that survives contact with reality — a box asking someone to label or annotate their own
+  upload gets mislabelled or left blank, and either way you can't act on it. It also means there is
+  no operator-supplied prose reaching a prompt, so the only untrusted text in the system is document
+  text, and that arrives fenced inside `<document_text>` tags.
 
 ---
 
@@ -1367,7 +1366,7 @@ Five moves:
 | # | Move | What it means |
 |---|---|---|
 | 1 | gather | each `ExtractedDocument`'s payload becomes one `<document>` block of evidence |
-| 2 | frame | add the case id, the presentation date, and any operator notes |
+| 2 | frame | add the case id and the presentation date |
 | 3 | instruct | "use the tools for every date and amount comparison — don't compute them yourself" |
 | 4 | reason | the model reads the table, spots what disagrees, and calls the tools to check the numbers |
 | 5 | validate | the reply is forced into a `ReconciliationReport` — and then §9 overrides its verdict |
@@ -1404,8 +1403,6 @@ def _reconciliation_prompt(
             "Date of presentation: not supplied. Do not raise a presentation-period "
             "finding on a date you had to assume."
         )
-    if state.notes:
-        parts.append(f"Operator notes: {state.notes}")
     parts.append(
         "\nUse the deterministic tools for every date and amount comparison rather than "
         "computing them yourself, and quote the figures they return in your findings.\n"
@@ -2184,7 +2181,6 @@ class CaseState:
 
     case_id: str
     presented_on: date | None = None
-    notes: str | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     usage: RunUsage = field(default_factory=RunUsage)
     events: list[StageEvent] = field(default_factory=list)

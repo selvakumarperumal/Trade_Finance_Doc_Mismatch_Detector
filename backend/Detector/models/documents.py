@@ -76,9 +76,6 @@ class CaseInput(BaseModel):
     """The date the documents were presented to the bank, when known. Required for
     the UCP 600 Art 14(c) presentation-period check."""
 
-    notes: str | None = None
-    """Free-text context from the ops user, passed to the reconciliation stage."""
-
 
 class Classification(BaseModel):
     """What the classifier agent decided about a single document."""
