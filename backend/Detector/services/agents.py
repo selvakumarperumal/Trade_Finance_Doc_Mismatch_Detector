@@ -12,7 +12,6 @@ from functools import lru_cache
 from typing import Any
 
 from pydantic_ai import Agent
-from pydantic_ai.concurrency import ConcurrencyLimiter
 from pydantic_ai.models.anthropic import AnthropicModelSettings
 from pydantic_ai.settings import ModelSettings, ThinkingLevel
 
@@ -44,29 +43,6 @@ def _model_settings(
     return base
 
 
-def build_limiter(settings: Settings) -> ConcurrencyLimiter | None:
-    """One limiter shared by every agent, or `None` for unbounded fan-out.
-
-    The graph runs each document's branch as its own task, so a large
-    presentation would otherwise put one model call in flight per document at
-    the same instant. Every one of those calls bills the same provider account
-    against the same rate limit, so the ceiling has to be shared across agents
-    rather than set per agent: eight extractors with a limit of six each is not
-    a limit of six.
-
-    Waiting for a slot shows up in Logfire as its own span, so a case that is
-    slow because it is queueing looks different from a case that is slow
-    because the model is thinking.
-    """
-    if settings.max_parallel_model_calls is None:
-        return None
-    return ConcurrencyLimiter(
-        max_running=settings.max_parallel_model_calls,
-        max_queued=settings.max_queued_model_calls,
-        name='detector-model-calls',
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class AgentRegistry:
     """Every agent the pipeline needs, built and ready."""
@@ -80,9 +56,6 @@ class AgentRegistry:
     reconciler: Agent[None, ReconciliationReport]
     """Cross-checks the extracted documents and issues the verdict."""
 
-    limiter: ConcurrencyLimiter | None = None
-    """The shared ceiling on concurrent model calls; `None` when unbounded."""
-
     def extractor(self, document_type: DocumentType) -> ExtractionAgent:
         """The extraction agent for one document family."""
         try:
@@ -93,15 +66,12 @@ class AgentRegistry:
 
 def build_agents(settings: Settings, prompts: PromptRegistry) -> AgentRegistry:
     """Construct the agent registry from settings and the prompt registry."""
-    limiter = build_limiter(settings)
-
     classifier = Agent(
         settings.classifier_model,
         name='document_classifier',
         output_type=Classification,
         instructions=prompts.classifier,
         retries=settings.retries,
-        max_concurrency=limiter,
         model_settings=_model_settings(
             model=settings.classifier_model,
             thinking=settings.classifier_thinking,
@@ -123,7 +93,6 @@ def build_agents(settings: Settings, prompts: PromptRegistry) -> AgentRegistry:
             output_type=payload_type,
             instructions=prompts.extractor(document_type),
             retries=settings.retries,
-            max_concurrency=limiter,
             model_settings=extraction_settings,
         )
         for document_type, payload_type in EXTRACTION_PAYLOAD_TYPES.items()
@@ -136,7 +105,6 @@ def build_agents(settings: Settings, prompts: PromptRegistry) -> AgentRegistry:
         instructions=prompts.reconciliation,
         tools=RECONCILIATION_TOOLS,
         retries=settings.retries,
-        max_concurrency=limiter,
         model_settings=_model_settings(
             model=settings.reconciliation_model,
             thinking=settings.reconciliation_thinking,
@@ -145,12 +113,7 @@ def build_agents(settings: Settings, prompts: PromptRegistry) -> AgentRegistry:
         ),
     )
 
-    return AgentRegistry(
-        classifier=classifier,
-        extractors=extractors,
-        reconciler=reconciler,
-        limiter=limiter,
-    )
+    return AgentRegistry(classifier=classifier, extractors=extractors, reconciler=reconciler)
 
 
 @lru_cache(maxsize=1)
