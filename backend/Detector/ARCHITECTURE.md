@@ -209,11 +209,12 @@ class RawDocument(BaseModel):
     text: str
     filename: str | None = None
     page_count: int | None = None
-    declared_type: DocumentType | None = None
 ```
 
-`declared_type` is what the uploader claimed. It is passed to the classifier as
-a hint and never trusted — uploaders mislabel constantly.
+There is deliberately **no field for the uploader to declare a document type**.
+The caller uploads a file; `classify` works out what it is from the text alone.
+`filename` is carried for reference only — it is never evidence, because naming a
+file `credit.pdf` does not make it a credit.
 
 **`RoutedDocument`** and its nine subclasses — the middle form:
 

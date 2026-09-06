@@ -171,8 +171,6 @@ class RawDocument(BaseModel):
 
     filename: str | None = None
     page_count: int | None = None
-    declared_type: DocumentType | None = None
-    """Type asserted by the uploader, if any. Used as a hint, never as the truth."""
 
 
 class CaseInput(BaseModel):
@@ -229,7 +227,10 @@ That's the entire public surface. Three things worth knowing:
   completion order, not the order you sent them.
 - **`presented_on` matters.** Without it the presentation-period check can't run, and the prompt
   explicitly tells the model not to guess a date. Leave it out and you silently lose a check.
-- **`declared_type` is a hint, never trusted.** Uploaders mislabel constantly.
+- **You don't say what any document is.** There is no "type" field to fill in. The uploader hands over
+  a file and the classifier works it out from the text — which is the only version that survives
+  contact with reality, since a field asking someone to label their own upload gets mislabelled or
+  left blank, and either way it can't be trusted enough to act on.
 
 ---
 
@@ -421,19 +422,24 @@ classifier: |
 
 ```python
 def _document_prompt(raw: RawDocument) -> str:
-    """Wrap one document's text so the model can see its identity and its boundaries."""
-    hint = (
-        f"\nThe uploader labelled this as {raw.declared_type.value}; treat that as a hint only."
-        if raw.declared_type is not None
-        else ""
-    )
+    """Wrap one document's text so the model can see its identity and its boundaries.
+
+    The uploader asserts nothing about what a document is: they upload a file and
+    the classifier decides. So the only evidence here is the text itself, fenced
+    off in `<document_text>` tags, plus enough identity for the model to refer to
+    the document in its reasoning.
+    """
     return (
         f"Document id: {raw.document_id}\n"
         f'Filename: {raw.filename or "unknown"}\n'
-        f'Pages: {raw.page_count if raw.page_count is not None else "unknown"}{hint}\n\n'
+        f'Pages: {raw.page_count if raw.page_count is not None else "unknown"}\n\n'
         f"<document_text>\n{raw.text}\n</document_text>"
     )
 ```
+
+**Nothing in that prompt says what the document is.** The id and filename are there so the model can
+*refer* to the document, not so it can identify it — `credit.pdf` is a name someone typed, and naming
+a file `credit.pdf` doesn't make it a credit. The classifier gets the text and nothing else.
 
 **Rendered for doc-lc, exactly as sent:**
 

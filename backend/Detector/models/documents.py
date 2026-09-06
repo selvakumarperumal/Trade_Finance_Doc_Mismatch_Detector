@@ -65,8 +65,6 @@ class RawDocument(BaseModel):
 
     filename: str | None = None
     page_count: int | None = None
-    declared_type: DocumentType | None = None
-    """Type asserted by the uploader, if any. Used as a hint, never as the truth."""
 
 
 class CaseInput(BaseModel):

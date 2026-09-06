@@ -80,16 +80,17 @@ collect = builder.join(
 
 
 def _document_prompt(raw: RawDocument) -> str:
-    """Wrap one document's text so the model can see its identity and its boundaries."""
-    hint = (
-        f"\nThe uploader labelled this as {raw.declared_type.value}; treat that as a hint only."
-        if raw.declared_type is not None
-        else ""
-    )
+    """Wrap one document's text so the model can see its identity and its boundaries.
+
+    The uploader asserts nothing about what a document is: they upload a file and
+    the classifier decides. So the only evidence here is the text itself, fenced
+    off in `<document_text>` tags, plus enough identity for the model to refer to
+    the document in its reasoning.
+    """
     return (
         f"Document id: {raw.document_id}\n"
         f'Filename: {raw.filename or "unknown"}\n'
-        f'Pages: {raw.page_count if raw.page_count is not None else "unknown"}{hint}\n\n'
+        f'Pages: {raw.page_count if raw.page_count is not None else "unknown"}\n\n'
         f"<document_text>\n{raw.text}\n</document_text>"
     )
 
