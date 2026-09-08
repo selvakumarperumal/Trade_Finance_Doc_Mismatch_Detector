@@ -1,15 +1,17 @@
 # Following one case, end to end
 
-Three documents go in. A refusal comes out. This document shows **every line of code** that runs in
-between, in the order it runs, with the real data flowing through it.
+Three documents go in. A refusal comes out. This is what happens in between.
 
-Every value shown is **captured from an actual run**. Every snippet is **copied verbatim from the
-source files** — nothing is abbreviated with `...`. Only the model's replies are simulated (the
-machine that produced this had no API key); the prompts, schemas, arithmetic and verdict logic are
-all genuine.
+Every value below is **captured from a real run**. Code is **copied from the source files**, trimmed
+to the lines that carry the argument — each snippet names its file, so the full version is one click
+away. Only the model's replies are simulated (the machine that produced this had no API key); the
+prompts, schemas, arithmetic and verdict logic are genuine.
 
-**How to read this:** each stage has the same three parts — *what happens*, *the code*, *what goes in
-and comes out*. Skim the prose, read the code, check the data.
+**How to read this.** Every stage has the same four parts:
+
+> **the idea** → **a diagram** → **the code** → **in / out**
+
+Read the idea and the diagram. Drop into the code only where you want to.
 
 | Companion | What it's for |
 |---|---|
@@ -19,80 +21,109 @@ and comes out*. Skim the prose, read the code, check the data.
 
 ---
 
-## In plain English, before any code
+## The 60-second version
 
-The same run as the rest of this file, with the code taken out. Skip it if the stage names below
-already mean something to you.
+A seller in India shipped t-shirts to a buyer in Singapore. The buyer's bank promised to pay — *if*
+the seller hands over paperwork matching the credit exactly. Banks pay against **documents, not
+goods**: if the paper disagrees with the credit, the bank refuses, even when the shipment plainly
+happened. A clerk normally checks this by hand, field by field.
 
-**The situation.** A seller in India shipped t-shirts to a buyer in Singapore. The buyer's bank
-promised to pay — *if* the seller hands over paperwork matching the credit exactly. Banks pay against
-**documents, not goods**: if the paper disagrees with the credit the bank refuses, even when the
-shipment plainly happened. A clerk normally checks this by hand, field by field. This project is the
-clerk.
+This project is that clerk.
 
-**What goes in.** Three documents as plain text — the credit, the invoice, the bill of lading — plus
-the date they reached the bank (2026-03-02). No OCR here; turning PDFs into text is your job.
-
-**What the machine does, in five moves.**
+```mermaid
+flowchart TD
+    IN(["CaseInput<br/>3 documents as text + presented_on"])
+    IN --> ING["1 · ingest<br/>validate, or refuse to start"]
+    ING --> FAN{{"2 · fan out<br/>one lane per document"}}
+    FAN --> LANE["3 lanes, running at the same time<br/>3 · classify → route　·　4 · extract"]
+    LANE --> JOIN{{"join<br/>wait for every lane"}}
+    JOIN --> REC["5 · reconcile<br/>one model call over all the typed fields"]
+    REC --> RULE["the status rule<br/>code overrides the model's verdict"]
+    RULE --> OUT(["CaseResult<br/>status = blocked · 4 findings"])
+```
 
 | # | Move | In plain words |
 |---|---|---|
-| 1 | `ingest` | Is there anything to work with? An empty case stops here, before spending a single model call. |
-| 2 | fan out | Split into one lane per document. The three lanes then run at the same time. |
+| 1 | `ingest` | Is there anything to work with? An empty case stops here, before spending a model call. |
+| 2 | fan out | Split into one lane per document. The lanes run at the same time. |
 | 3 | `classify` → route | *"What am I looking at?"* — then hand it to the specialist for that family. |
-| 4 | `extract` | The specialist fills in a form: text ➜ typed fields, real `Decimal`s and `date`s, never strings. |
+| 4 | `extract` | The specialist fills in a form: text ➜ typed fields, real `Decimal`s and `date`s. |
 | 5 | `reconcile` | The lanes rejoin. One model reads the tidy fields side by side and lists what disagrees. |
 
-**Why not one big prompt?** A model asked to read messy OCR *and* judge compliance at the same time
-does both slightly badly. Extraction is form-filling; reconciliation is judgement. Split apart, the
-hard step gets to read a clean table instead of raw scan noise.
-
-**What comes out.** Three genuine problems and one trap:
+**What came out** — three genuine problems and one trap:
 
 | What it found | Severity |
 |---|---|
-| Invoice is USD 268,400 against a USD 250,000 credit — over the ceiling even with the stated 5% tolerance | critical |
-| Shipped 2026-02-24, four days past the latest shipment date | critical |
-| Discharge port is Port Klang, Malaysia; the credit says Singapore | critical |
-| Goods worded differently on the bill of lading than on the credit — permitted, so **not** a discrepancy | info |
+| Invoice is USD 268,400 against a USD 250,000 credit — over the ceiling even with the stated 5% tolerance | `critical` |
+| Shipped 2026-02-24, four days past the latest shipment date | `critical` |
+| Discharge port is Port Klang, Malaysia; the credit says Singapore | `critical` |
+| Goods worded differently on the bill of lading than on the credit — permitted, so **not** a discrepancy | `info` |
 
 Verdict: **`blocked`**.
 
-**The one design idea to carry into the code below.** The model *finds* discrepancies, but it never
-gets the last word. The money and date arithmetic is done in plain Python ([§8](#8-reconcile)), and
-the final verdict is a rule rather than an opinion ([§9](#9-the-status-rule)): a report that lists a
-critical finding while claiming `clean` comes back `blocked`, every time.
+### Why not one big prompt?
+
+A model asked to read messy OCR *and* judge compliance at the same time does both slightly badly.
+
+```mermaid
+flowchart LR
+    subgraph ONE["one big prompt"]
+        direction LR
+        A["raw OCR × 3"] --> B["read AND judge<br/>at the same time"] --> C["findings"]
+    end
+    subgraph SPLIT["this pipeline"]
+        direction LR
+        D["raw OCR × 3"] --> E["extract<br/>form-filling"] --> F["clean typed table"] --> G["reconcile<br/>judgement only"] --> H["findings"]
+    end
+```
+
+Extraction is form-filling. Reconciliation is judgement. Split apart, the hard step gets to read a
+clean table instead of raw scan noise.
+
+### The one idea to carry into the code below
+
+The model *finds* discrepancies, but it never gets the last word.
+
+- Money and date arithmetic runs in plain Python ([§8](#8-reconcile)).
+- The final verdict is a rule, not an opinion ([§9](#9-the-status-rule)).
+
+A report that lists a critical finding while claiming `clean` comes back `blocked`, every time.
 
 ---
 
 ## Contents
 
-Every numbered stage opens with an **In plain words** block — the idea with no code in it — before
-the code and the data. If a section is heavy going, that block is the part to read.
-
 | | Stage | What it does |
 |---|---|---|
-| [—](#in-plain-english-before-any-code) | — | **The whole run, no code — start here** |
 | [0](#0-the-papers) | — | The three documents |
 | [1](#1-what-you-hand-in) | — | `CaseInput` |
 | [2](#2-ingest) | `ingest` | Validate, or refuse to start |
-| [3](#3-the-fan-out) | fork | One branch per document |
+| [3](#3-the-fan-out) | fork | One lane per document |
 | [4](#4-classify) | `classify` | What kind of document is this? |
 | [5](#5-route) | decision | Pick the extractor — *and why nine empty classes* |
-| [6](#6-extract) | `extract_*` | Text → typed fields — *and `ExtractionPayload`, step by step* |
-| [7](#7-the-join) | join | Wait for all branches |
+| [6](#6-extract) | `extract_*` | Text → typed fields |
+| [7](#7-the-join) | join | Wait for all lanes |
 | [8](#8-reconcile) | `reconcile` | Cross-check everything |
 | [9](#9-the-status-rule) | — | Findings → verdict |
 | [10](#10-the-output) | — | What the caller gets |
-| [11](#11-the-whole-graph-in-one-place) | — | The wiring |
+| [11](#11-the-wiring) | — | How the graph is built |
 | [12](#12-file-map) | — | Where each piece lives |
+
+**The shape of the data, all the way through** — each stage is one arrow:
+
+```mermaid
+flowchart LR
+    A["str<br/>raw OCR text"] --> B["Classification<br/>type + confidence"]
+    B --> C["LetterOfCreditDoc<br/>a routing type"]
+    C --> D["LetterOfCredit<br/>Decimal + date fields"]
+    D --> E["ExtractedDocument<br/>payload or error"]
+    E --> F["ReconciliationReport<br/>findings"]
+    F --> G["CaseResult<br/>the verdict"]
+```
 
 ---
 
 ## 0. The papers
-
-A seller in India shipped t-shirts to a buyer in Singapore under a letter of credit. To get paid, the
-seller presents three documents to the bank.
 
 **The credit** — the bank's promise, and the definition of a compliant presentation:
 
@@ -143,21 +174,25 @@ Presented to the bank on **2026-03-02**.
 > matter that the shipment really happened. If the paperwork disagrees with the credit, the bank
 > refuses to pay. The rulebook is **UCP 600**.
 
-Three real problems and one red herring are hiding in there.
+Three real problems and one red herring are hiding in there. Try to spot them before §10.
 
 ---
 
 ## 1. What you hand in
 
-**What happens:** you turn PDFs into text (the package does no OCR), wrap them in models, and make
-one call.
+**The idea.** This package starts where the PDF ends — you do the OCR, it takes text. Wrap each
+document in a `RawDocument`, drop them into a `CaseInput` with the date the bank received them, and
+call `run()` once. That is the entire public surface.
 
-**In plain words.** This package starts where the PDF ends — you do the OCR, it takes text. Put each
-document's text in a `RawDocument`, drop them all into a `CaseInput` along with the date the bank
-received them, and call `run()` once. That is the entire public surface: one function, one object in,
-one report out.
+```mermaid
+flowchart LR
+    P["your PDFs"] -->|"your OCR<br/>not in this package"| T["plain text"]
+    T --> R["RawDocument × 3"]
+    R --> C["CaseInput<br/>+ presented_on"]
+    C -->|"await run()"| RES["CaseResult"]
+```
 
-### The models — `Detector/models/documents.py`
+### The code — [`Detector/models/documents.py`](Detector/models/documents.py)
 
 ```python
 class RawDocument(BaseModel):
@@ -183,26 +218,7 @@ class CaseInput(BaseModel):
     the UCP 600 Art 14(c) presentation-period check."""
 ```
 
-### The call — `Detector/services/pipeline.py`
-
-```python
-async def run(self, case: CaseInput) -> CaseResult:
-    """Analyse one presentation and return the finished report."""
-    with span(
-        'analyse case {case_id}',
-        case_id=case.case_id,
-        document_count=len(case.documents),
-    ) as case_span:
-        result = await case_graph.run(
-            state=CaseState.for_case(case),
-            deps=self.deps,
-            inputs=case,
-        )
-        _annotate(case_span, result)
-        return result
-```
-
-### Input
+### In
 
 ```python
 case = CaseInput(
@@ -218,43 +234,42 @@ case = CaseInput(
 result = await get_pipeline().run(case)
 ```
 
-That's the entire public surface. Three things worth knowing:
+Three things worth knowing:
 
 - **`document_id` is yours.** Findings and progress events key on it, and documents come back in
   completion order, not the order you sent them.
 - **`presented_on` matters.** Without it the presentation-period check can't run, and the prompt
-  explicitly tells the model not to guess a date. Leave it out and you silently lose a check.
-- **You describe nothing.** There is no field for saying what a document is, and none for free-text
-  context. The uploader hands over files; everything else is derived from the text. That is the only
-  version that survives contact with reality — a box asking someone to label or annotate their own
-  upload gets mislabelled or left blank, and either way you can't act on it. It also means there is
-  no operator-supplied prose reaching a prompt, so the only untrusted text in the system is document
+  tells the model not to guess a date. Leave it out and you silently lose a check.
+- **You describe nothing.** There is no field for saying what a document is. A box asking someone to
+  label their own upload gets mislabelled or left blank, and either way you can't act on it. It also
+  means no operator prose ever reaches a prompt — the only untrusted text in the system is document
   text, and that arrives fenced inside `<document_text>` tags.
 
 ---
 
 ## 2. `ingest`
 
-**What happens:** the first graph step validates the whole case, then hands the documents to the
-fan-out. Nothing is truncated — oversized input is rejected.
+**The idea.** The doorman. Before a single model call gets paid for, it asks three questions of the
+case and refuses the whole thing if any answer is wrong. Everything downstream is then free to assume
+its input is sane.
 
-**In plain words.** The doorman. Before a single model call gets paid for, it asks three questions of
-the case, and refuses the whole thing if any answer is wrong. Everything downstream is then free to
-assume its input is sane.
+```mermaid
+flowchart TD
+    IN(["CaseInput"]) --> Q1{"at most 25<br/>documents?"}
+    Q1 -->|no| X1["raise ValueError<br/>a runaway upload shouldn't<br/>cost 200 model calls"]
+    Q1 -->|yes| Q2{"each at most<br/>120,000 chars?"}
+    Q2 -->|no| X2["raise ValueError<br/>never truncate — see below"]
+    Q2 -->|yes| Q3{"any text at all<br/>after stripping?"}
+    Q3 -->|no| X3["raise ValueError<br/>a blank page extracts<br/>as all-nulls"]
+    Q3 -->|yes| OK(["hand the list to the fan-out"])
+```
 
-| Check | Refuses when | Why not just fix it quietly? |
-|---|---|---|
-| how many documents | above `max_documents_per_case` | a runaway upload shouldn't silently cost 200 model calls |
-| how long each one is | above `max_document_chars` | see below — this is the dangerous one |
-| whether there's any text | `text` is blank after stripping | there is nothing to classify, and a blank page "extracts" as all-nulls |
-
-The middle one is worth dwelling on. A letter of credit cut off halfway **still extracts
+**The middle one is the dangerous one.** A letter of credit cut off halfway **still extracts
 successfully** — it just quietly loses whichever terms fell off the end, and reconciliation then finds
 nothing wrong with a presentation that actually breaks them. Truncation doesn't produce an error, it
-produces a *confident wrong answer*, which is the most expensive thing this system could do. Failing
-loudly at the door is the cheapest outcome on the menu.
+produces a *confident wrong answer*. Failing loudly at the door is the cheapest outcome on the menu.
 
-### The code — `Detector/services/graph.py`
+### The code — [`Detector/services/graph.py`](Detector/services/graph.py)
 
 ```python
 @builder.step
@@ -289,7 +304,12 @@ async def ingest(
 ```
 
 A step is just an async function taking a `StepContext`, which gives you three things:
-`ctx.inputs` (this step's input), `ctx.deps` (injected services), `ctx.state` (mutable scratchpad).
+
+| | Is |
+|---|---|
+| `ctx.inputs` | this step's input |
+| `ctx.deps` | injected services — agents, settings |
+| `ctx.state` | a mutable scratchpad for the whole run |
 
 ### In → Out
 
@@ -300,28 +320,31 @@ out: [RawDocument, RawDocument, RawDocument]
 [ingest] accepted 3 document(s)
 ```
 
-**The important part is what it refuses to do.** An oversized document raises instead of being
-trimmed. A silently truncated letter of credit still extracts — it just extracts *confidently and
-wrongly*, missing whichever terms fell off the end. Failing loudly at the door is the cheapest
-outcome available.
-
 Returning a `list` is what sets up the next step.
 
 ---
 
 ## 3. The fan-out
 
-**What happens:** the list splits into one concurrent branch per document.
+**The idea.** One clerk reading three documents in turn is slower than three clerks reading one each.
+`.map()` hires the three clerks.
 
-**In plain words.** One clerk reading three documents in turn is slower than three clerks reading one
-each. `.map()` is what hires the three clerks: it takes the list `ingest` returned and starts a
-separate, independent lane for each element in it.
+```mermaid
+flowchart LR
+    ING["ingest<br/>returns list[RawDocument]"] --> FAN{{"fan out<br/>.map()"}}
+    FAN --> A["doc-lc<br/>classify → route → extract"]
+    FAN --> B["doc-inv<br/>classify → route → extract"]
+    FAN --> C["doc-bol<br/>classify → route → extract"]
+    A --> J{{"join"}}
+    B --> J
+    C --> J
+    J --> R["reconcile"]
+```
 
-The step signatures are the tell. `ingest` returns `list[RawDocument]` (plural), but `classify` is
-declared as taking a single `RawDocument` — because by the time `classify` runs, the list has already
-been split up and each lane is holding one item.
+The step signatures are the tell. `ingest` returns `list[RawDocument]` (plural), but `classify` takes
+a single `RawDocument` — because by the time `classify` runs, the list has already been split up.
 
-### The code — `Detector/services/graph.py`
+### The code — [`Detector/services/graph.py`](Detector/services/graph.py)
 
 ```python
 builder.edge_from(ingest)
@@ -330,29 +353,23 @@ builder.edge_from(ingest)
 .to(classify),
 ```
 
-`.map()` is the fork. It takes the list `ingest` returned and sends **each element down its own
-branch**, so `classify` receives a single `RawDocument`, not the list.
+Each lane is fully independent. **doc-lc starts extracting while doc-bol is still classifying** —
+there is no phase barrier, only the join at the end.
 
-```
-                  ┌── doc-lc  ── classify → route → extract ──┐
-ingest ── fan out ├── doc-inv ── classify → route → extract ──┤ join → reconcile
-                  └── doc-bol ── classify → route → extract ──┘
-```
-
-Each branch is fully independent. **doc-lc starts extracting while doc-bol is still classifying** —
-there is no phase barrier, only the join at the end. Measured with 300 ms model calls and 3
-documents: **0.93s**, against 2.10s if it ran sequentially.
+| 3 documents, 300 ms model calls | Wall clock |
+|---|---|
+| this pipeline, in parallel | **0.93 s** |
+| the same work, sequentially | 2.10 s |
 
 `downstream_join_id` handles one edge case: mapping an *empty* list. Without it, a case with zero
 documents would fan out to nothing and the join would wait forever. With it, the fork jumps straight
-to the join, which yields its empty initial value and reconciliation reports "no documents
-presented".
+to the join, which yields its empty initial value and reconciliation reports "no documents presented".
 
 ### In → Out
 
 ```
-in : [RawDocument, RawDocument, RawDocument]       # one list, from ingest
-out: 3 independent branches, one RawDocument each  # all running at the same time
+in : [RawDocument, RawDocument, RawDocument]     # one list, from ingest
+out: 3 independent lanes, one RawDocument each   # all running at the same time
 ```
 
 Nothing is computed here. The fan-out is pure control flow — it changes *how many things are
@@ -362,23 +379,23 @@ happening*, not what any of them are.
 
 ## 4. `classify`
 
-**What happens:** each branch asks the model which document family it's holding. Runs three times, in
-parallel.
+**The idea.** Every lane opens with the same question: *"what am I holding?"* The answer decides which
+form gets filled in next, so it has to be settled first. A deliberately small, cheap call — pick one
+label out of nine, don't read anything closely.
 
-**In plain words.** Every lane opens with the same question: *"what am I holding?"* The answer decides
-which form gets filled in at the next step, so it has to be settled first. It's a deliberately small,
-cheap call — all it has to do is pick one label out of nine, not read anything closely.
+```mermaid
+flowchart LR
+    D["RawDocument"] --> W["wrap in<br/>&lt;document_text&gt; tags"]
+    W --> A["classifier agent<br/>model + prompt + output_type"]
+    A --> V["Classification<br/>type · confidence · reasoning"]
+    V --> Q{"confidence<br/>≥ 0.5?"}
+    Q -->|yes| E["envelope for that family<br/>e.g. LetterOfCreditDoc"]
+    Q -->|no| U["UnclassifiedDoc"]
+```
 
-Four things happen to one document here, in order:
+### The agent — [`Detector/services/agents.py`](Detector/services/agents.py)
 
-| # | Move | What it means |
-|---|---|---|
-| 1 | build the prompt | the document's text wrapped in `<document_text>` tags, with its id and filename above |
-| 2 | ask the agent | a model + a system prompt + `output_type=Classification` |
-| 3 | check the answer | Pydantic validates the shape; confidence under the threshold is downgraded to `unknown` |
-| 4 | wrap it up | put it in the envelope class for that family — which is what §5 routes on |
-
-### The agent — `Detector/services/agents.py`
+An agent is **a model + a system prompt + an output type**. The output type does the heavy lifting.
 
 ```python
 classifier = Agent(
@@ -387,18 +404,11 @@ classifier = Agent(
     output_type=Classification,
     instructions=prompts.classifier,
     retries=settings.retries,
-    model_settings=_model_settings(
-        model=settings.classifier_model,
-        thinking=settings.classifier_thinking,
-        max_tokens=settings.classifier_max_tokens,
-        cache_instructions=settings.cache_instructions,
-    ),
+    model_settings=_model_settings(...),
 )
 ```
 
-An agent is **a model + a system prompt + an output type**. The output type does the heavy lifting.
-
-### The system prompt — `Config/prompts.yaml`
+### The prompt — [`Config/prompts.yaml`](Config/prompts.yaml)
 
 ```yaml
 classifier: |
@@ -409,25 +419,15 @@ classifier: |
     - letter_of_credit: 'Applicant'/'Beneficiary', LC number, issuing bank
     - commercial_invoice: 'Invoice Number', seller/buyer, line-item pricing
     - bill_of_lading: 'Shipper'/'Consignee'/'Vessel', port of loading/discharge
-    - packing_list: package counts, gross/net weight, dimensions
-    - certificate_of_origin: 'Country of Origin', exporter declaration
-    - insurance_certificate: insured amount, coverage type, policy/certificate number
-    - bill_of_exchange: 'Drawer'/'Drawee', tenor (e.g. 'at sight'), draft number
-    - inspection_certificate: inspecting agency name, pass/fail or inspection result
+    - ...
   If it doesn't clearly match one of these, classify as unknown rather than guessing.
 ```
 
-### How the document gets wrapped — `Detector/services/graph.py`
+### How the document is wrapped — [`Detector/services/graph.py`](Detector/services/graph.py)
 
 ```python
 def _document_prompt(raw: RawDocument) -> str:
-    """Wrap one document's text so the model can see its identity and its boundaries.
-
-    The uploader asserts nothing about what a document is: they upload a file and
-    the classifier decides. So the only evidence here is the text itself, fenced
-    off in `<document_text>` tags, plus enough identity for the model to refer to
-    the document in its reasoning.
-    """
+    """Wrap one document's text so the model can see its identity and its boundaries."""
     return (
         f"Document id: {raw.document_id}\n"
         f'Filename: {raw.filename or "unknown"}\n'
@@ -436,41 +436,14 @@ def _document_prompt(raw: RawDocument) -> str:
     )
 ```
 
-**Nothing in that prompt says what the document is.** The id and filename are there so the model can
-*refer* to the document, not so it can identify it — `credit.pdf` is a name someone typed, and naming
-a file `credit.pdf` doesn't make it a credit. The classifier gets the text and nothing else.
+Two things that prompt does:
 
-**Rendered for doc-lc, exactly as sent:**
+- **It says nothing about what the document is.** The id and filename let the model *refer* to the
+  document, not identify it — naming a file `credit.pdf` doesn't make it a credit.
+- **The `<document_text>` tags mark where untrusted OCR text starts and stops**, so a scanned document
+  containing the words "ignore your instructions" reads as content, not as a command.
 
-```
-Document id: doc-lc
-Filename: credit.pdf
-Pages: unknown
-
-<document_text>
-
-IRREVOCABLE DOCUMENTARY CREDIT
-LC Number: LC-2026-88431
-Issuing Bank: Meridian Commercial Bank, Singapore
-Applicant: Harborline Trading Pte Ltd, Singapore
-Beneficiary: Anand Textiles Pvt Ltd, Tirupur, India
-Amount: USD 250,000.00
-Tolerance: +/- 5 PCT
-Expiry Date: 2026-03-15 at counters of issuing bank
-Latest Shipment Date: 2026-02-20
-Port of Loading: Chennai, India
-Port of Discharge: Singapore
-Description of Goods: 40,000 pcs 100% cotton knitted t-shirts, CIF Singapore
-Documents required: signed commercial invoice, full set clean on board ocean
-bills of lading, packing list.
-
-</document_text>
-```
-
-The `<document_text>` tags mark where untrusted OCR text starts and stops, so a scanned document
-containing the words "ignore your instructions" reads as content, not as a command.
-
-### The shape the reply must take — `Detector/models/documents.py`
+### The shape the reply must take — [`Detector/models/documents.py`](Detector/models/documents.py)
 
 ```python
 class Classification(BaseModel):
@@ -488,114 +461,46 @@ class Classification(BaseModel):
     """The markers in the text that drove the decision, in one or two sentences."""
 ```
 
-Pydantic AI turns that class into a JSON schema the provider is made to conform to. **This is the
-real generated schema:**
+**Those docstrings are not comments — they are part of the prompt.** Pydantic AI turns the class into
+a JSON schema the provider must conform to, and `use_attribute_docstrings=True` lifts each docstring
+into the schema as a `description` the model reads at inference time:
 
 ```json
-{
-  "document_type": {
-    "$ref": "#/$defs/DocumentType",
-    "description": "The family this document belongs to, or `unknown` if it doesn't clearly match one."
-  },
-  "confidence": {
-    "description": "How sure the classifier is, from 0 to 1.",
-    "minimum": 0.0,
-    "maximum": 1.0,
-    "type": "number"
-  },
-  "reasoning": {
-    "description": "The markers in the text that drove the decision, in one or two sentences.",
-    "type": "string"
-  }
+"confidence": {
+  "description": "How sure the classifier is, from 0 to 1.",
+  "minimum": 0.0, "maximum": 1.0, "type": "number"
 }
 ```
 
-Those `description` strings are **not comments — they are part of the prompt**, read by the model at
-inference time. `use_attribute_docstrings=True` is what lifts them out of the field docstrings, so
-the type definition and the instructions physically cannot drift apart.
+So the type definition and the instructions physically cannot drift apart. `extra='forbid'` becomes
+`additionalProperties: false`, which is what lets the provider enforce the schema strictly rather than
+accepting invented fields.
 
-`extra='forbid'` becomes `additionalProperties: false`, which is what lets the provider enforce the
-schema strictly rather than accepting invented fields.
-
-### The step — `Detector/services/graph.py`
+### The step's two defences — [`Detector/services/graph.py`](Detector/services/graph.py)
 
 ```python
-@builder.step
-async def classify(
-    ctx: StepContext[CaseState, DetectorDeps, RawDocument],
-) -> RoutedDocuments:
-    """Decide which document family this text belongs to, and wrap it for routing.
-
-    A failure here degrades one document to unclassified instead of failing the
-    case: the remaining documents still get reconciled, and the gap shows up as a
-    finding rather than a 500.
-    """
-    raw = ctx.inputs
-    deps = ctx.deps
-
     try:
         result = await deps.agents.classifier.run(
-            _document_prompt(raw),
-            usage_limits=deps.usage_limits,
+            _document_prompt(raw), usage_limits=deps.usage_limits
         )
     except (UsageLimitExceeded, RunCancelled):
-        raise
+        raise                                   # a blown budget must stop the case
     except AgentRunError as exc:
-        ctx.state.record(
-            "classify",
-            f"classification failed: {exc}",
-            document_id=raw.document_id,
-            document_type=DocumentType.UNKNOWN,
-        )
-        return UnclassifiedDoc(
-            raw=raw,
-            classification=Classification(
-                document_type=DocumentType.UNKNOWN,
-                confidence=0.0,
-                reasoning=f"classification failed: {exc}",
-            ),
-        )
-
-    usage = TokenUsage.from_run_usage(result.usage)
+        return UnclassifiedDoc(...)             # a flaky HTTP 500 must not
 
     classification = result.output
-    threshold = deps.settings.min_classification_confidence
-    if classification.confidence < threshold:
-        ctx.state.record(
-            "classify",
-            f"classified as {classification.document_type.value} at "
-            f"{classification.confidence:.2f}, below the {threshold:.2f} threshold; "
-            "treating as unclassified",
-            document_id=raw.document_id,
-            document_type=DocumentType.UNKNOWN,
-            usage=result.usage,
-        )
+    if classification.confidence < deps.settings.min_classification_confidence:
         return UnclassifiedDoc(raw=raw, classification=classification, usage=usage)
 
-    ctx.state.record(
-        "classify",
-        f"classified as {classification.document_type.value} at {classification.confidence:.2f}",
-        document_id=raw.document_id,
-        document_type=classification.document_type,
-        usage=result.usage,
-    )
     envelope = ROUTED_DOCUMENT_TYPES[classification.document_type]
-    return cast(
-        RoutedDocuments, envelope(raw=raw, classification=classification, usage=usage)
-    )
+    return cast(RoutedDocuments, envelope(raw=raw, classification=classification, usage=usage))
 ```
 
-**Two defences are built into that function.**
-
-*A failed call degrades one document, not the case.* Note the exception ordering —
-`UsageLimitExceeded` and `RunCancelled` are *subclasses* of `AgentRunError`, so they must be caught
-and re-raised first or they'd be swallowed. A blown budget or a cancellation should stop the case; a
-flaky HTTP 500 should not.
-
-*A low-confidence result is treated as unknown* (`min_classification_confidence` defaults to `0.5`).
-A document called a packing list at 0.2 confidence is better treated as unreadable than run through
-the packing-list extractor, which would produce a plausible-looking extraction of entirely the wrong
-fields.
+| Defence | Why |
+|---|---|
+| **a failed call degrades one document, not the case** | the other documents still get reconciled, and the gap shows up as a finding rather than a 500 |
+| **the exception order** | `UsageLimitExceeded` and `RunCancelled` are *subclasses* of `AgentRunError`, so they must be re-raised first or they'd be swallowed |
+| **low confidence → unknown** | a document called a packing list at 0.2 confidence is better treated as unreadable than run through the packing-list extractor, which would produce a plausible extraction of entirely the wrong fields |
 
 ### In → Out
 
@@ -611,22 +516,30 @@ out: LetterOfCreditDoc(raw=..., classification=Classification(
 [classify] doc-bol: bill_of_lading     at 0.95
 ```
 
-`result.output` is a **validated object**, not a string to parse. `confidence` is guaranteed to be
+`result.output` is a **validated object**, not a string to parse. `confidence` is guaranteed to sit
 between 0 and 1 because the schema said so and Pydantic checked.
 
 ---
 
 ## 5. Route
 
-**What happens:** the classified document is dispatched to the right extractor — by type, not by
-string comparison.
+**The idea.** The classifier said "letter of credit". Something now has to send this document to the
+LC extractor and not the invoice one.
 
-**In plain words.** The classifier said "letter of credit". Something now has to send this document to
-the LC extractor and not the invoice one. This section is that switchboard — and it is built so that
-**adding a document family and forgetting to wire it up is a type error, not a bug you meet in
-production.** That single goal explains everything odd-looking below.
+The whole section exists for one goal: **adding a document family and forgetting to wire it up should
+be a type error, not a bug you meet in production.** That explains everything odd-looking below.
 
-#### Step 1 — the version almost every codebase would write
+```mermaid
+flowchart LR
+    C["classify returns<br/>one of 9 envelope classes"] --> R{"route_by_document_type<br/>isinstance, not =="}
+    R -->|LetterOfCreditDoc| E1["extract_letter_of_credit"]
+    R -->|CommercialInvoiceDoc| E2["extract_commercial_invoice"]
+    R -->|BillOfLadingDoc| E3["extract_bill_of_lading"]
+    R -->|"+ 5 more families"| E4["extract_..."]
+    R -->|UnclassifiedDoc| SK["skip_unclassified<br/>a route, not an error"]
+```
+
+### Step 1 — the version almost every codebase would write
 
 ```python
 if doc.classification.document_type == DocumentType.LETTER_OF_CREDIT:
@@ -636,18 +549,16 @@ elif doc.classification.document_type == DocumentType.COMMERCIAL_INVOICE:
 elif ...
 ```
 
-This works. It has exactly one flaw: **nothing checks that the chain is complete.** Add a ninth family
-next year, forget one `elif`, and nothing objects — not your editor, not the type checker, not a test
-you didn't think to write. You find out when a real packing list falls off the end of the chain, in
-front of a customer.
+This works. It has one flaw: **nothing checks that the chain is complete.** Add a ninth family next
+year, forget one `elif`, and nothing objects — not your editor, not the type checker, not a test you
+didn't think to write. You find out in front of a customer.
 
 Nothing *can* check it, either, and the reason is worth naming: `document_type` is a **value**. Values
 get compared while the program runs, so a type checker has no way to see which ones you covered.
 
-#### Step 2 — make the family a *type* instead of a value
+### Step 2 — make the family a *type* instead of a value
 
-So `classify` doesn't hand on a `RoutedDocument` carrying a string. It hands on **one of nine
-classes**, one per family, each of which adds nothing whatsoever:
+So `classify` hands on **one of nine classes**, one per family, each adding nothing whatsoever:
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -659,140 +570,15 @@ Nine classes, nine empty bodies, no new fields between them. Their **only** job 
 *different types* — and then to be named together as one:
 
 ```python
-type RoutedDocuments = LetterOfCreditDoc | CommercialInvoiceDoc | ... | UnclassifiedDoc
-```
-
-#### Step 3 — dispatch on the type
-
-```python
-.branch(builder.match(LetterOfCreditDoc).to(extract_letter_of_credit))
-```
-
-`builder.match(SomeClass)` is an `isinstance` test rather than a string comparison. The behaviour at
-runtime is the same as the `if` chain — but now every branch names a *type*.
-
-#### Step 4 — and that is what makes the difference
-
-`Decision` accumulates the types it has handled in a type parameter, branch by branch. So writing this
-return annotation:
-
-```python
-def _routing_decision() -> Decision[CaseState, DetectorDeps, RoutedDocuments]:
-```
-
-is an **assertion that the branch table covers the whole union**. Miss a family and the accumulated
-type is narrower than `RoutedDocuments`, the annotation stops holding, and the type checker says so —
-before anything runs.
-
-| | `if` on a string | `match` on a type |
-|---|---|---|
-| you forget a family | silent fall-through | the annotation fails |
-| when you find out | a customer's presentation, in production | in your editor, before the commit |
-
-That guarantee is the entire return on nine otherwise-pointless classes.
-
-#### Step 5 — why frozen dataclasses and not Pydantic models
-
-These envelopes live for the few milliseconds between `classify` and `extract` and never cross a
-process boundary, so they need no validation, no JSON schema and no serialisation. `frozen=True` makes
-them immutable, `slots=True` drops the per-instance dict. They're the cheapest object that can carry a
-type.
-
-### The envelopes — `Detector/models/documents.py`
-
-```python
-@dataclass(frozen=True, slots=True)
-class RoutedDocument:
-    """A classified document on its way to an extractor.
-
-    The subclasses below carry no extra data; they exist so the graph's
-    `Decision` node can dispatch on type instead of on a string comparison,
-    which makes the routing table exhaustively checkable by a type checker.
-    """
-
-    raw: RawDocument
-    classification: Classification
-    usage: TokenUsage = TokenUsage()
-    """What classifying this document cost, carried forward so the per-document
-    total in `ExtractedDocument` covers the whole branch, not just extraction."""
-
-
-@dataclass(frozen=True, slots=True)
-class LetterOfCreditDoc(RoutedDocument):
-    """Routed to the LC extractor."""
-
-
-@dataclass(frozen=True, slots=True)
-class CommercialInvoiceDoc(RoutedDocument):
-    """Routed to the invoice extractor."""
-
-
-@dataclass(frozen=True, slots=True)
-class BillOfLadingDoc(RoutedDocument):
-    """Routed to the bill of lading extractor."""
-
-
-@dataclass(frozen=True, slots=True)
-class PackingListDoc(RoutedDocument):
-    """Routed to the packing list extractor."""
-
-
-@dataclass(frozen=True, slots=True)
-class CertificateOfOriginDoc(RoutedDocument):
-    """Routed to the certificate of origin extractor."""
-
-
-@dataclass(frozen=True, slots=True)
-class InsuranceCertificateDoc(RoutedDocument):
-    """Routed to the insurance certificate extractor."""
-
-
-@dataclass(frozen=True, slots=True)
-class BillOfExchangeDoc(RoutedDocument):
-    """Routed to the bill of exchange extractor."""
-
-
-@dataclass(frozen=True, slots=True)
-class InspectionCertificateDoc(RoutedDocument):
-    """Routed to the inspection certificate extractor."""
-
-
-@dataclass(frozen=True, slots=True)
-class UnclassifiedDoc(RoutedDocument):
-    """Not recognised as any known family; skips extraction."""
-
-
 type RoutedDocuments = (
-    LetterOfCreditDoc
-    | CommercialInvoiceDoc
-    | BillOfLadingDoc
-    | PackingListDoc
-    | CertificateOfOriginDoc
-    | InsuranceCertificateDoc
-    | BillOfExchangeDoc
-    | InspectionCertificateDoc
-    | UnclassifiedDoc
+    LetterOfCreditDoc | CommercialInvoiceDoc | BillOfLadingDoc | PackingListDoc
+    | CertificateOfOriginDoc | InsuranceCertificateDoc | BillOfExchangeDoc
+    | InspectionCertificateDoc | UnclassifiedDoc
 )
 """Every branch the routing decision must handle."""
-
-
-ROUTED_DOCUMENT_TYPES: dict[DocumentType, type[RoutedDocument]] = {
-    DocumentType.LETTER_OF_CREDIT: LetterOfCreditDoc,
-    DocumentType.COMMERCIAL_INVOICE: CommercialInvoiceDoc,
-    DocumentType.BILL_OF_LADING: BillOfLadingDoc,
-    DocumentType.PACKING_LIST: PackingListDoc,
-    DocumentType.CERTIFICATE_OF_ORIGIN: CertificateOfOriginDoc,
-    DocumentType.INSURANCE_CERTIFICATE: InsuranceCertificateDoc,
-    DocumentType.BILL_OF_EXCHANGE: BillOfExchangeDoc,
-    DocumentType.INSPECTION_CERTIFICATE: InspectionCertificateDoc,
-    DocumentType.UNKNOWN: UnclassifiedDoc,
-}
-"""Maps a classifier verdict onto the envelope that routes it."""
 ```
 
-Nine classes, and **every one of them has an empty body.** They add no data at all.
-
-### The branch table — `Detector/services/graph.py`
+### Step 3 — dispatch on the type
 
 ```python
 def _routing_decision() -> Decision[CaseState, DetectorDeps, RoutedDocuments]:
@@ -802,30 +588,54 @@ def _routing_decision() -> Decision[CaseState, DetectorDeps, RoutedDocuments]:
     adding a branch here is a type error rather than a silent fall-through.
     """
     return (
-        builder.decision(
-            node_id="route_by_document_type", note="UCP 600 document families"
-        )
+        builder.decision(node_id="route_by_document_type", note="UCP 600 document families")
         .branch(builder.match(LetterOfCreditDoc).to(extract_letter_of_credit))
         .branch(builder.match(CommercialInvoiceDoc).to(extract_commercial_invoice))
         .branch(builder.match(BillOfLadingDoc).to(extract_bill_of_lading))
-        .branch(builder.match(PackingListDoc).to(extract_packing_list))
-        .branch(builder.match(CertificateOfOriginDoc).to(extract_certificate_of_origin))
-        .branch(
-            builder.match(InsuranceCertificateDoc).to(extract_insurance_certificate)
-        )
-        .branch(builder.match(BillOfExchangeDoc).to(extract_bill_of_exchange))
-        .branch(
-            builder.match(InspectionCertificateDoc).to(extract_inspection_certificate)
-        )
+        # ... five more ...
         .branch(builder.match(UnclassifiedDoc).to(skip_unclassified))
     )
 ```
 
-Nine branches, one per member of `RoutedDocuments` — and the return annotation on the function is
-what forces it to stay that way. That is Steps 3 and 4 above, in the actual code.
+`builder.match(SomeClass)` is an `isinstance` test rather than a string comparison. At runtime the
+behaviour is the same as the `if` chain — but now every branch names a *type*.
+
+### Step 4 — and that is what makes the difference
+
+`Decision` accumulates the types it has handled in a type parameter, branch by branch. So the return
+annotation `Decision[..., RoutedDocuments]` is an **assertion that the branch table covers the whole
+union**. Miss a family and the accumulated type is narrower, the annotation stops holding, and the
+type checker says so — before anything runs.
+
+| | `if` on a string | `match` on a type |
+|---|---|---|
+| you forget a family | silent fall-through | the annotation fails |
+| when you find out | a customer's presentation, in production | in your editor, before the commit |
+
+That guarantee is the entire return on nine otherwise-pointless classes.
+
+### Step 5 — why frozen dataclasses and not Pydantic models
+
+These envelopes live for the few milliseconds between `classify` and `extract` and never cross a
+process boundary, so they need no validation, no JSON schema and no serialisation. `frozen=True` makes
+them immutable, `slots=True` drops the per-instance dict. They're the cheapest object that can carry a
+type.
+
+The classifier's verdict picks the envelope through one table in
+[`Detector/models/documents.py`](Detector/models/documents.py):
+
+```python
+ROUTED_DOCUMENT_TYPES: dict[DocumentType, type[RoutedDocument]] = {
+    DocumentType.LETTER_OF_CREDIT: LetterOfCreditDoc,
+    DocumentType.COMMERCIAL_INVOICE: CommercialInvoiceDoc,
+    # ... one row per family ...
+    DocumentType.UNKNOWN: UnclassifiedDoc,
+}
+"""Maps a classifier verdict onto the envelope that routes it."""
+```
 
 Note that `skip_unclassified` is a branch like any other. "We couldn't read this" is a route, not an
-error, which is why an unreadable document still reaches the join and still appears in the report.
+error — which is why an unreadable document still reaches the join and still appears in the report.
 
 ### In → Out
 
@@ -838,34 +648,26 @@ out: dispatched to the extract_letter_of_credit step
 
 ## 6. `extract`
 
-**What happens:** each family's own agent turns document text into typed fields. Three times, in
-parallel.
-
-**In plain words.** Filling in a form. Routing already decided which form — now the specialist for
-that family reads the document and writes each value into a named, typed box. Text goes in;
+**The idea.** Filling in a form. Routing already decided *which* form — now the specialist for that
+family reads the document and writes each value into a named, typed box. Text goes in;
 `Decimal('250000.00')` and `date(2026, 3, 15)` come out.
 
-The one instruction that matters: **leave it blank rather than guess.** Every field can legally be
-empty, so "the credit doesn't state a tolerance" is a real answer the model is allowed to give. A
-blank field is evidence the next stage can reason about; an invented one is a compliance failure
-nobody will catch.
+The one instruction that matters: **leave it blank rather than guess.** A blank field is evidence the
+next stage can reason about; an invented one is a compliance failure nobody will catch.
 
-Two things carry the weight here, and neither is the prompt:
+```mermaid
+flowchart LR
+    R["LetterOfCreditDoc"] --> A["lc extractor agent<br/>output_type=LetterOfCredit"]
+    A --> P["LetterOfCredit<br/>Decimal · date · str | None"]
+    A -->|"AgentRunError"| ERR["payload=None<br/>error='extraction failed: ...'"]
+    P --> X["ExtractedDocument"]
+    ERR --> X
+    X -->|"either way, it travels on"| J{{"join"}}
+```
 
-| | Does what |
-|---|---|
-| the payload class | tells the model every field name, type and description — *the schema is the prompt* |
-| `ExtractionPayload` | lets that filled-in form survive the trip to JSON and back — taken apart below |
-
-### The output type — `Detector/models/extractions.py`
+### The output type — [`Detector/models/extractions.py`](Detector/models/extractions.py)
 
 ```python
-class ExtractionBase(BaseModel):
-    """Shared configuration for every extraction payload."""
-
-    model_config = ConfigDict(extra='forbid', use_attribute_docstrings=True)
-
-
 class LetterOfCredit(ExtractionBase):
     """Structured fields of a documentary credit (MT700 style)."""
 
@@ -873,88 +675,38 @@ class LetterOfCredit(ExtractionBase):
 
     lc_number: str | None = None
     issuing_bank: str | None = None
-    advising_bank: str | None = None
     applicant: str | None = None
     beneficiary: str | None = None
     credit_amount: Decimal | None = None
     currency: str | None = None
-    issue_date: date | None = None
     expiry_date: date | None = None
-    expiry_place: str | None = None
     latest_shipment_date: date | None = None
     port_of_loading: str | None = None
     port_of_discharge: str | None = None
-    place_of_delivery: str | None = None
     description_of_goods: str | None = None
-    partial_shipments_allowed: bool | None = None
-    transhipment_allowed: bool | None = None
-    presentation_period: str | None = None
-    """Presentation period as written, e.g. 'within 21 days after shipment date'."""
-
-    presentation_period_days: int | None = None
-    """The presentation period reduced to a number of days, when it is expressed that way."""
 
     tolerance_percent: Decimal | None = None
     """Amount tolerance stated on the credit, e.g. 5 for 'about'/'+/- 5 pct'."""
 
     required_insurance_percent: Decimal | None = None
     """Minimum insured percentage the credit demands, e.g. 110."""
+
+    # ... and 9 more fields; see the file for the full list
 ```
 
-**Every field is `| None = None`.** That is deliberate: it makes "not present" a legal answer, which
-is exactly what the prompt asks for. A missing field is evidence in its own right; a hallucinated one
-is a compliance failure.
+Three decisions in that block:
 
-`Decimal` for money, `date` for dates — never `float`, never `str`. Tolerance arithmetic on a float
-is how you refuse a compliant presentation for being $0.000001 over.
+| Decision | Why |
+|---|---|
+| **every field is `\| None = None`** | makes "not present" a legal answer, which is exactly what the prompt asks for |
+| **`Decimal` for money, `date` for dates** — never `float`, never `str` | tolerance arithmetic on a float is how you refuse a compliant presentation for being $0.000001 over |
+| **`kind` is a single-valued `Literal` with a default** | the model can only ever emit the correct tag, and is never even offered the choice |
 
-The `kind` field is a single-valued `Literal` with a default, so **the model can only ever emit the
-correct tag.** That tag is what makes the payload union round-trip through JSON — the next subsection
-takes that apart slowly:
+### Why `kind` exists — `ExtractionPayload` in three steps
 
-```python
-ExtractionPayload = Annotated[
-    LetterOfCredit
-    | CommercialInvoice
-    | BillOfLading
-    | PackingList
-    | CertificateOfOrigin
-    | InsuranceCertificate
-    | BillOfExchange
-    | InspectionCertificate,
-    Field(discriminator='kind'),
-]
-"""Any extraction payload, tagged by document type so it round-trips through JSON."""
-
-
-EXTRACTION_PAYLOAD_TYPES: dict[DocumentType, type[ExtractionBase]] = {
-    DocumentType.LETTER_OF_CREDIT: LetterOfCredit,
-    DocumentType.COMMERCIAL_INVOICE: CommercialInvoice,
-    DocumentType.BILL_OF_LADING: BillOfLading,
-    DocumentType.PACKING_LIST: PackingList,
-    DocumentType.CERTIFICATE_OF_ORIGIN: CertificateOfOrigin,
-    DocumentType.INSURANCE_CERTIFICATE: InsuranceCertificate,
-    DocumentType.BILL_OF_EXCHANGE: BillOfExchange,
-    DocumentType.INSPECTION_CERTIFICATE: InspectionCertificate,
-}
-"""Maps a classified document type to the payload the extractor must return."""
-```
-
-### `ExtractionPayload`, step by step
-
-That `Annotated[...]` block is the one piece of type machinery here that isn't obvious on sight. Read
-it in five steps.
-
-**Step 1 — the problem.** When a document finishes its branch it becomes an `ExtractedDocument`,
-which has to carry whatever was pulled out of it. What type is that field?
-
-```python
-class ExtractedDocument(BaseModel):
-    document_id: str
-    payload: ???        # LetterOfCredit? CommercialInvoice? BillOfLading? …
-```
-
-You can't answer until the run is happening. The eight families share almost no fields:
+**The problem.** When a document finishes its lane it becomes an `ExtractedDocument`, which has to
+carry whatever was pulled out of it. What type is that field? The eight families share almost no
+fields:
 
 | `LetterOfCredit` | `CommercialInvoice` | `BillOfLading` |
 |---|---|---|
@@ -962,35 +714,29 @@ You can't answer until the run is happening. The eight families share almost no 
 | `credit_amount` | `total_amount` | `shipment_date` |
 | `expiry_date` | `invoice_date` | `vessel_name` |
 
-**Step 2 — the obvious answer isn't enough.** Python's way to say "one of several types" is a plain
-union: `LetterOfCredit | CommercialInvoice | …`. In memory that's fine. It breaks the moment the
-object is written to a database or an HTTP response and read back, because **JSON has no classes** —
-a stored payload is just a bag of keys, and Pydantic has to work out which class to rebuild. Every
-field here is optional, so most classes fit most bags. Give it two same-shaped classes and no tag,
-and it does not raise, it *guesses*:
+**A plain union isn't enough.** `LetterOfCredit | CommercialInvoice | …` is fine in memory. It breaks
+the moment the object is written to a database or an HTTP response and read back, because **JSON has
+no classes** — a stored payload is just a bag of keys, and Pydantic has to work out which class to
+rebuild. Every field is optional, so most classes fit most bags. With no tag it does not raise, it
+*guesses*:
 
 ```
 in  : {'reference': 'INV-4471', 'amount': '268400.00'}   # this row came off an invoice
 out : LooksLikeACredit  <- wrong class, and nothing raised
 ```
 
-A silent wrong answer: every later check reading `payload.credit_amount` is now reading an invoice
-total.
+Every later check reading `payload.credit_amount` is now reading an invoice total.
 
-**Step 3 — the fix: write the answer into the data.** Every payload class carries one field whose
-only job is to say what it is:
+**The fix: write the answer into the data.**
 
-```python
-kind: Literal[DocumentType.COMMERCIAL_INVOICE] = DocumentType.COMMERCIAL_INVOICE
+```mermaid
+flowchart LR
+    J["JSON row<br/>kind: commercial_invoice"] --> D{"read the<br/>'kind' field"}
+    D -->|letter_of_credit| A["LetterOfCredit"]
+    D -->|commercial_invoice| B["CommercialInvoice"]
+    D -->|bill_of_lading| C["BillOfLading"]
+    D -->|"freight_note"| E["ValidationError<br/>not a guess"]
 ```
-
-Read it as: ***`kind` is allowed exactly one value, and it is already filled in.*** `Literal[...]`
-with a single member makes every other value illegal; the default means you never set it by hand and
-**the model is never offered the choice** — in the JSON schema it appears as
-`{'const': 'commercial_invoice', 'default': 'commercial_invoice'}`. A field used this way is called a
-**discriminator**: the thing that tells the alternatives apart.
-
-**Step 4 — `ExtractionPayload` is those two facts, named.**
 
 ```python
 ExtractionPayload = Annotated[
@@ -1000,15 +746,9 @@ ExtractionPayload = Annotated[
 ```
 
 One English sentence: **"one of these eight — read `kind` to know which."** `Annotated[X, Y]` creates
-no new type; it is `X` with a note `Y` stapled on for tools that care.
-
-| Part | What it says |
-|---|---|
-| the `\|` union | the value is one of these eight classes |
-| `Field(discriminator='kind')` | to tell them apart, look at `kind` — never guess |
-
-To a type checker, `ExtractionPayload` is just the eight-way union. To Pydantic it is a **tagged
-union**, and Step 2's guessing is gone.
+no new type; it is `X` with a note `Y` stapled on for tools that care. To a type checker
+`ExtractionPayload` is just the eight-way union; to Pydantic it is a **tagged union**, and the
+guessing is gone.
 
 Two names, opposite directions — worth not mixing up:
 
@@ -1017,59 +757,27 @@ Two names, opposite directions — worth not mixing up:
 | `ExtractionPayload` | `kind` string ➜ class | rebuilding a payload **out of** JSON |
 | `EXTRACTION_PAYLOAD_TYPES` | `DocumentType` ➜ class | picking which agent and schema to run **before** extraction |
 
-**Step 5 — in → out.** Four cases, captured from a real run:
-
-```python
->>> adapter = TypeAdapter(ExtractionPayload)
-```
-
-*A — one dict in, the right class out:*
+Round-tripped through JSON on this case's real data:
 
 ```
 in  : {'kind': 'commercial_invoice', 'invoice_number': 'INV-4471',
        'total_amount': '268400.00', 'invoice_date': '2026-02-18'}
 out : CommercialInvoice
-      total_amount = Decimal('268400.00')      <- Decimal, not a string
+      total_amount = Decimal('268400.00')       <- Decimal, not a string
       invoice_date = datetime.date(2026, 2, 18) <- a real date
+
+back through JSON and equal to the original? True
 ```
 
-*B — object → JSON → object, unchanged:*
+**Where it's used — and where it isn't.** One place: `ExtractedDocument.payload`. Each extraction
+agent gets one **concrete** class as its `output_type`, never the union, because by the time an agent
+runs the routing decision has already fixed the family. The union exists for the payload's life
+**after** extraction — through the API response and the database row, and back out a
+`CommercialInvoice` rather than a `dict`.
 
-```
-json: {"kind":"commercial_invoice","invoice_number":"INV-4471","invoice_date":"2026-02-18",…}
-back: CommercialInvoice | equal to the original? True
-```
-
-*C — a tag that isn't one of ours:*
-
-```
-Input tag 'freight_note' found using 'kind' does not match any of the expected tags: …
-```
-
-*D — no tag at all:*
-
-```
-Unable to extract tag using discriminator 'kind'
-```
-
-**Where it's used — and where it isn't.** One place: `ExtractedDocument.payload`, below. Note where
-it is *not*: each extraction agent gets one **concrete** class as its `output_type`, never the union,
-because by the time an agent runs the routing decision has already fixed the family. The union exists
-for the payload's life **after** extraction — inside `ExtractedDocument`, through the API response
-and the database row, and back out a `CommercialInvoice` rather than a `dict`.
-
-> **In one line:** `ExtractionPayload` = *"one of the eight payload classes, and `kind` says which."*
-> `kind` is fixed by the class, not chosen by the model, so it is always right.
-
-### The agents — `Detector/services/agents.py`
+### The agents — [`Detector/services/agents.py`](Detector/services/agents.py)
 
 ```python
-extraction_settings = _model_settings(
-    model=settings.extraction_model,
-    thinking=settings.extraction_thinking,
-    max_tokens=settings.extraction_max_tokens,
-    cache_instructions=settings.cache_instructions,
-)
 extractors: dict[DocumentType, ExtractionAgent] = {
     document_type: Agent(
         settings.extraction_model,
@@ -1083,11 +791,29 @@ extractors: dict[DocumentType, ExtractionAgent] = {
 }
 ```
 
-Eight separate agents rather than one agent with a dynamic output type, because each family also
-needs its own system prompt — and a per-family agent gives per-family spans and per-family retry
-budgets.
+Eight separate agents rather than one agent with a dynamic output type, because each family also needs
+its own system prompt — and a per-family agent gives per-family spans and per-family retry budgets.
 
-### The system prompt — `Config/prompts.yaml`
+The eight graph steps are likewise **generated, not written out eight times**:
+
+```python
+def _extraction_step(document_type: DocumentType) -> Step[...]:
+    async def extract(ctx: StepContext[CaseState, DetectorDeps, RoutedDocument]) -> ExtractedDocument:
+        return await _extract(ctx, document_type)
+
+    return builder.step(
+        extract,
+        node_id=f"extract_{document_type.value}",       # its own node in the rendered graph
+        label=document_type.value.replace("_", " "),    # and its own instrumentation span
+    )
+
+
+extract_letter_of_credit = _extraction_step(DocumentType.LETTER_OF_CREDIT)
+extract_commercial_invoice = _extraction_step(DocumentType.COMMERCIAL_INVOICE)
+# ... six more ...
+```
+
+### The prompt — [`Config/prompts.yaml`](Config/prompts.yaml)
 
 ```yaml
 lc_extractor: |
@@ -1101,103 +827,11 @@ lc_extractor: |
     - description_of_goods, partial_shipments_allowed, transhipment_allowed, presentation_period
 ```
 
-Note how much work the prompt *doesn't* do. It doesn't have to describe field types or formats —
-`output_type=LetterOfCredit` already told the model every field name, type and description. The
-prompt sets the **policy**: only what's in the text, null rather than a guess.
+Note how much work the prompt *doesn't* do. It never describes field types or formats —
+`output_type=LetterOfCredit` already told the model every field name, type and description. The prompt
+sets the **policy**: only what's in the text, null rather than a guess.
 
-### The step — `Detector/services/graph.py`
-
-```python
-async def _extract(
-    ctx: StepContext[CaseState, DetectorDeps, RoutedDocument],
-    document_type: DocumentType,
-) -> ExtractedDocument:
-    """Run one family's extraction agent over one document."""
-    routed = ctx.inputs
-    raw = routed.raw
-    deps = ctx.deps
-
-    base = {
-        "document_id": raw.document_id,
-        "filename": raw.filename,
-        "document_type": document_type,
-        "confidence": routed.classification.confidence,
-        "classification_reasoning": routed.classification.reasoning,
-    }
-
-    try:
-        result = await deps.agents.extractor(document_type).run(
-            _document_prompt(raw),
-            usage_limits=deps.usage_limits,
-        )
-    except (UsageLimitExceeded, RunCancelled):
-        raise
-    except AgentRunError as exc:
-        ctx.state.record(
-            "extract",
-            f"extraction failed: {exc}",
-            document_id=raw.document_id,
-            document_type=document_type,
-        )
-        return ExtractedDocument(
-            **base,
-            payload=None,
-            error=f"extraction failed: {exc}",
-            usage=routed.usage,
-        )
-
-    usage = result.usage
-    ctx.state.record(
-        "extract",
-        f"extracted {document_type.value}",
-        document_id=raw.document_id,
-        document_type=document_type,
-        usage=usage,
-    )
-    return ExtractedDocument(
-        **base,
-        payload=result.output,
-        usage=routed.usage + TokenUsage.from_run_usage(usage),
-    )
-```
-
-The eight family steps are **generated, not written out eight times**:
-
-```python
-def _extraction_step(
-    document_type: DocumentType,
-) -> Step[CaseState, DetectorDeps, Any, ExtractedDocument]:
-    """Build the graph step that extracts one document family.
-
-    The eight families differ only in their agent and their payload type, so the
-    step bodies are generated rather than written out eight times. Each still
-    gets its own node id, which is what shows up in the rendered graph and in the
-    instrumentation spans.
-    """
-
-    async def extract(
-        ctx: StepContext[CaseState, DetectorDeps, RoutedDocument],
-    ) -> ExtractedDocument:
-        return await _extract(ctx, document_type)
-
-    return builder.step(
-        extract,
-        node_id=f"extract_{document_type.value}",
-        label=document_type.value.replace("_", " "),
-    )
-
-
-extract_letter_of_credit = _extraction_step(DocumentType.LETTER_OF_CREDIT)
-extract_commercial_invoice = _extraction_step(DocumentType.COMMERCIAL_INVOICE)
-extract_bill_of_lading = _extraction_step(DocumentType.BILL_OF_LADING)
-extract_packing_list = _extraction_step(DocumentType.PACKING_LIST)
-extract_certificate_of_origin = _extraction_step(DocumentType.CERTIFICATE_OF_ORIGIN)
-extract_insurance_certificate = _extraction_step(DocumentType.INSURANCE_CERTIFICATE)
-extract_bill_of_exchange = _extraction_step(DocumentType.BILL_OF_EXCHANGE)
-extract_inspection_certificate = _extraction_step(DocumentType.INSPECTION_CERTIFICATE)
-```
-
-### The result carrier — `Detector/models/documents.py`
+### The result carrier — [`Detector/models/documents.py`](Detector/models/documents.py)
 
 ```python
 class ExtractedDocument(BaseModel):
@@ -1227,11 +861,6 @@ class ExtractedDocument(BaseModel):
 report instead of a stack trace in your logs.
 
 ### In → Out
-
-```
-in : LetterOfCreditDoc(...)
-out: ExtractedDocument(document_id='doc-lc', payload=LetterOfCredit(...), error=None)
-```
 
 **The real extracted payload for doc-lc:**
 
@@ -1275,22 +904,27 @@ is why the amount check downstream is a single subtraction.
 
 ## 7. The join
 
-**What happens:** all branches are gathered back into one list. This is the only barrier in the
-graph.
+**The idea.** The three lanes set off together but finish at different times. The join is the desk they
+each hand their finished form to; when the last one arrives, the whole pile moves on as a single list.
 
-**In plain words.** The three lanes set off together but finish at different times. The join is the
-desk they each hand their finished form to; when the last one arrives, the whole pile moves on as a
-single list.
+```mermaid
+flowchart LR
+    A["doc-bol<br/>finishes 1st"] --> J{{"collect_extractions<br/>reduce_list_append"}}
+    B["doc-lc<br/>finishes 2nd"] --> J
+    C["doc-inv<br/>finishes 3rd"] --> J
+    U["skip_unclassified<br/>nothing to do, but must still arrive"] -.-> J
+    J -->|"all lanes reported"| R["reconcile<br/>list[ExtractedDocument]"]
+```
 
 Two consequences worth carrying forward:
 
-- **Results arrive in completion order, not the order you submitted them.** doc-bol may well come back
-  before doc-lc. That is why every finding keys on `document_id` and never on a position in a list.
+- **Results arrive in completion order, not submission order.** doc-bol may well come back before
+  doc-lc. That is why every finding keys on `document_id` and never on a position in a list.
 - **Every lane has to arrive — including the ones with nothing to do.** An unclassified document has
   no extractor to visit, so `skip_unclassified` exists purely to walk it to the join. Delete it and
-  the join waits forever for a branch that never reports, and the case hangs.
+  the join waits forever for a lane that never reports, and the case hangs.
 
-### The code — `Detector/services/graph.py`
+### The code — [`Detector/services/graph.py`](Detector/services/graph.py)
 
 ```python
 COLLECT_ID = "collect_extractions"
@@ -1306,14 +940,9 @@ collect = builder.join(
 
 `reduce_list_append` is Pydantic Graph's built-in reducer — *append each result to the accumulator*.
 `initial_factory=list[ExtractedDocument]` works because calling a generic alias constructs the
-underlying type: `list[int]()` is `[]`.
-
-The join's parent fork is inferred automatically — Pydantic Graph walks the graph and finds the fork
-that dominates it, which is the `.map()` on `ingest`.
+underlying type: `list[int]()` is `[]`. The join's parent fork is inferred automatically.
 
 ### The unclassified path
-
-Documents that never reached an extractor still have to arrive here, or the join would hang:
 
 ```python
 @builder.step(node_id="skip_unclassified", label="unknown")
@@ -1326,21 +955,13 @@ async def skip_unclassified(
     presented that the pipeline could not read.
     """
     routed = ctx.inputs
-    ctx.state.record(
-        "skip",
-        "not recognised as a known document family",
-        document_id=routed.raw.document_id,
-        document_type=DocumentType.UNKNOWN,
-    )
+    ctx.state.record("skip", "not recognised as a known document family", ...)
     return ExtractedDocument(
         document_id=routed.raw.document_id,
-        filename=routed.raw.filename,
         document_type=DocumentType.UNKNOWN,
-        confidence=routed.classification.confidence,
-        classification_reasoning=routed.classification.reasoning,
         payload=None,
         error="document type could not be determined; not extracted",
-        usage=routed.usage,
+        ...
     )
 ```
 
@@ -1355,33 +976,37 @@ out: [ExtractedDocument, ExtractedDocument, ExtractedDocument]
 
 ## 8. `reconcile`
 
-**What happens:** one model call over all the documents at once. This is where discrepancies are
-found.
+**The idea.** Everything up to now was preparation. This is the actual job: one model call that sees
+every document's typed fields laid out side by side, and is asked what disagrees.
 
-**In plain words.** Everything up to now was preparation. This is the actual job: one model call that
-sees every document's typed fields laid out side by side, and is asked what disagrees.
+```mermaid
+sequenceDiagram
+    autonumber
+    participant S as reconcile step
+    participant M as reconciliation agent
+    participant T as tools.py · pure Python
 
-Five moves:
+    S->>S: gather usable payloads into XML evidence
+    S->>M: evidence + case id + presented_on
+    M->>T: check_amount_tolerance 250000, 268400, 5
+    T-->>M: over by 5900.00
+    M->>T: check_date_order shipment vs latest shipment
+    T-->>M: late by 4 days
+    M->>T: check_presentation_period
+    T-->>M: in time
+    M-->>S: ReconciliationReport · 4 findings
+    S->>S: _finalise_report overrides the status
+```
 
-| # | Move | What it means |
-|---|---|---|
-| 1 | gather | each `ExtractedDocument`'s payload becomes one `<document>` block of evidence |
-| 2 | frame | add the case id and the presentation date |
-| 3 | instruct | "use the tools for every date and amount comparison — don't compute them yourself" |
-| 4 | reason | the model reads the table, spots what disagrees, and calls the tools to check the numbers |
-| 5 | validate | the reply is forced into a `ReconciliationReport` — and then §9 overrides its verdict |
+**Why XML here, when everything else is JSON?** The evidence is a stack of nested records the model has
+to *read*, not parse. Tagged blocks keep every field name pressed against its value at every level of
+nesting, so `<port_of_discharge>Singapore</port_of_discharge>` stays unambiguous three documents deep
+— and a field that is absent is visibly absent, rather than a `null` sitting in a list of commas.
 
-**Why XML here, when everything else is JSON?** The evidence is a stack of nested records the model
-has to *read*, not parse. Tagged blocks keep every field name pressed against its value at every level
-of nesting, so `<port_of_discharge>Singapore</port_of_discharge>` stays unambiguous three documents
-deep — and a field that is absent is visibly absent, rather than a `null` sitting in a list of commas.
-
-### Building the evidence — `Detector/services/graph.py`
+### Building the evidence — [`Detector/services/graph.py`](Detector/services/graph.py)
 
 ```python
-def _reconciliation_prompt(
-    state: CaseState, documents: Sequence[ExtractedDocument]
-) -> str:
+def _reconciliation_prompt(state: CaseState, documents: Sequence[ExtractedDocument]) -> str:
     """Render the extracted documents as the evidence for the compliance check."""
     evidence = [
         {
@@ -1392,10 +1017,7 @@ def _reconciliation_prompt(
         }
         for document in documents
     ]
-    parts = [
-        f"Case: {state.case_id}",
-        f"Documents presented: {len(documents)}",
-    ]
+    parts = [f"Case: {state.case_id}", f"Documents presented: {len(documents)}"]
     if state.presented_on is not None:
         parts.append(f"Date of presentation: {state.presented_on.isoformat()}")
     else:
@@ -1407,13 +1029,11 @@ def _reconciliation_prompt(
         "\nUse the deterministic tools for every date and amount comparison rather than "
         "computing them yourself, and quote the figures they return in your findings.\n"
     )
-    parts.append(
-        format_as_xml(evidence, root_tag="extracted_documents", item_tag="document")
-    )
+    parts.append(format_as_xml(evidence, root_tag="extracted_documents", item_tag="document"))
     return "\n".join(parts)
 ```
 
-**The rendered prompt, exactly as sent:**
+**The rendered prompt, exactly as sent** (two of the three documents shown):
 
 ```xml
 Case: case-001
@@ -1441,22 +1061,6 @@ computing them yourself, and quote the figures they return in your findings.
     </fields>
   </document>
   <document>
-    <document_id>doc-inv</document_id>
-    <document_type>commercial_invoice</document_type>
-    <classification_confidence>0.96</classification_confidence>
-    <fields>
-      <kind>commercial_invoice</kind>
-      <invoice_number>INV-4471</invoice_number>
-      <invoice_date>2026-02-18</invoice_date>
-      <lc_reference_number>LC-2026-88431</lc_reference_number>
-      <seller>Anand Textiles Pvt Ltd, Tirupur, India</seller>
-      <buyer>Harborline Trading Pte Ltd, Singapore</buyer>
-      <currency>USD</currency>
-      <total_amount>268400.00</total_amount>
-      <description_of_goods>40,000 pcs 100% cotton knitted t-shirts, CIF Singapore</description_of_goods>
-    </fields>
-  </document>
-  <document>
     <document_id>doc-lc</document_id>
     <document_type>letter_of_credit</document_type>
     <classification_confidence>0.97</classification_confidence>
@@ -1476,89 +1080,61 @@ computing them yourself, and quote the figures they return in your findings.
       <tolerance_percent>5</tolerance_percent>
     </fields>
   </document>
+  <!-- doc-inv omitted here for length; it is rendered the same way -->
 </extracted_documents>
 ```
 
-**This is the payoff of splitting into three stages.** The hard reasoning step reads a tidy, typed
-table — never raw OCR text. Hand it the original documents instead and it would be doing extraction
-and judgement at the same time, and doing both slightly worse.
+**This is the payoff of splitting into stages.** The hard reasoning step reads a tidy, typed table —
+never raw OCR text.
 
-### The system prompt — `Config/prompts.yaml`
+### The prompt — [`Config/prompts.yaml`](Config/prompts.yaml)
 
 ```yaml
 reconciliation_engine: |
   You are a trade finance documentary-compliance checker, modeled on how a bank operations
   analyst checks documents against UCP 600 style rules and ISBP 745 international standards.
-  You are given structured extractions from trade documents (LC, Invoice, Bill of Lading,
-  Packing List, Certificate of Origin, Insurance Certificate, Bill of Exchange, Inspection Certificate),
-  which you can rely on as the single source of truth for field values.
+  You are given structured extractions from trade documents ... which you can rely on as the
+  single source of truth for field values.
 
   Cross-check these fields across all the documents where applicable:
     - Party names: Applicant vs Buyer vs Consignee; Beneficiary vs Seller vs Shipper vs Drawer
-    - Amount and Currency: Invoice amount must not exceed LC amount (subject to tolerances e.g. UCP 600 Art 30).
-      Draft amount must match invoice / LC presentation amount. Insurance amount must meet required LC coverage (typically >= 110% of CIF/CIP value).
-    - Goods description: Must be consistent; invoice must strictly correspond with LC description (UCP 600 Art 18c), while other documents may use general terms not conflicting with the LC.
-    - Ports and Transport: Port of loading, port of discharge, place of delivery across transport and insurance documents vs LC
-    - Dates: Bill of lading shipment date vs LC latest shipment date and expiry date. Presentation within allowed period. Insurance date on or before shipment date.
-    - Document References: LC number referenced on invoice, packing list, COO, draft; invoice number referenced on packing list/COO.
-    - Quantities and Weights: Consistency across Bill of Lading, Commercial Invoice, and Packing List.
+    - Amount and Currency: Invoice amount must not exceed LC amount (subject to tolerances e.g. UCP 600 Art 30) ...
+    - Goods description: invoice must strictly correspond with LC description (UCP 600 Art 18c), while
+      other documents may use general terms not conflicting with the LC.
+    - Ports and Transport, Dates, Document References, Quantities and Weights ...
 
   For every mismatch, cite exactly which documents disagree and explain the discrepancy
   in plain language a bank ops person would understand. Classify the severity:
-    - 'critical': For anything causing a documentary discrepancy under LC rules (e.g. expired LC, late shipment, over-drawn amount, mismatched beneficiary, ports mismatch, goods discrepancy on invoice).
-    - 'warning': For ambiguities or differences worth a human examiner look (e.g. minor party name/address formatting variations, partial shipment nuances).
+    - 'critical': anything causing a documentary discrepancy under LC rules
+    - 'warning': ambiguities or differences worth a human examiner look
 ```
 
-### The arithmetic is not the model's job — `Detector/services/tools.py`
+### The arithmetic is not the model's job — [`Detector/services/tools.py`](Detector/services/tools.py)
 
-Date and money maths is exactly where language models are subtly and confidently wrong, and exactly
-where being wrong costs the beneficiary a refusal. So four pure functions are registered as tools:
+The model is good at *noticing* that an invoice amount and a credit amount ought to be compared. It is
+not reliable at doing the comparison. "268,400 against 250,000 with a 5% tolerance" is three
+operations, and a model that gets one of them slightly wrong writes a confident, wrong,
+impossible-to-falsify sentence.
 
-**In plain words.** The model is good at *noticing* that an invoice amount and a credit amount ought to
-be compared. It is not reliable at doing the comparison. "268,400 against 250,000 with a 5% tolerance"
-is three operations, and a model that gets one of them slightly wrong writes a confident, wrong,
-impossible-to-falsify sentence. So the noticing stays with the model and the arithmetic moves into
-Python:
+So the noticing stays with the model and the arithmetic moves into Python:
 
 | The model decides | Python computes |
 |---|---|
 | *these two amounts should be compared, and the credit states 5%* | `250000 × 1.05 = 262500`; `268400 − 262500 = 5900` → over |
 | *this shipment date should be checked against that deadline* | `2026-02-24` vs `2026-02-20` → 4 days late |
 
-Each tool hands back a ready-made sentence in `detail`, and the prompt tells the model to quote the
-figures it returns. So every number in the finished report was produced by `Decimal` arithmetic — not
-generated as text and hoped about.
+Four pure functions are registered as tools:
+
+| Tool | Checks | Rule |
+|---|---|---|
+| `check_amount_tolerance` | presented amount against credit + stated tolerance | UCP 600 Art 30(a) |
+| `check_insurance_coverage` | insured sum against a percentage floor of goods value | UCP 600 Art 28(f)(ii) |
+| `check_date_order` | one date falls on or before another, with the gap in days | — |
+| `check_presentation_period` | documents reached the bank in time | UCP 600 Art 14(c) |
+
+One of them in full — the others follow the same shape:
 
 ```python
-class ToolVerdict(BaseModel):
-    """Shared shape for every deterministic check."""
-
-    model_config = ConfigDict(extra='forbid')
-
-    passed: bool
-    """True when the check is satisfied."""
-
-    detail: str
-    """One line stating the computed numbers, for the agent to quote in its finding."""
-
-
-class AmountVerdict(ToolVerdict):
-    """Result of an amount-against-limit comparison."""
-
-    difference: Decimal
-    """presented minus permitted; positive means the presentation is over."""
-
-    permitted_maximum: Decimal
-    """The ceiling the presented amount was compared against."""
-
-
-class DateVerdict(ToolVerdict):
-    """Result of a date-ordering comparison."""
-
-    days_between: int
-    """later minus earlier, in days; negative means the dates are out of order."""
-
-
 def check_amount_tolerance(
     credit_amount: Decimal,
     presented_amount: Decimal,
@@ -1584,130 +1160,15 @@ def check_amount_tolerance(
         f'{"within" if passed else f"over by {difference}"}'
     )
     return AmountVerdict(
-        passed=passed,
-        detail=detail,
-        difference=difference,
-        permitted_maximum=permitted,
+        passed=passed, detail=detail, difference=difference, permitted_maximum=permitted
     )
-
-
-def check_insurance_coverage(
-    goods_value: Decimal,
-    insured_amount: Decimal,
-    required_percent: Decimal = Decimal(110),
-) -> AmountVerdict:
-    """Check that an insurance document covers at least the required percentage of value.
-
-    UCP 600 Art 28(f)(ii) sets a minimum of 110% of the CIF or CIP value where the
-    credit is silent. Here the check is inverted relative to `check_amount_tolerance`:
-    the computed amount is a floor, not a ceiling.
-
-    Args:
-        goods_value: The CIF/CIP value of the goods, normally the invoice total.
-        insured_amount: The sum insured on the certificate or policy.
-        required_percent: Minimum coverage the credit requires, as a percentage.
-    """
-    required = goods_value * required_percent / _HUNDRED
-    difference = insured_amount - required
-    passed = difference >= _ZERO
-    detail = (
-        f'insured {insured_amount} against required {required_percent}% of {goods_value} '
-        f'(floor {required}): {"adequate" if passed else f"short by {-difference}"}'
-    )
-    return AmountVerdict(
-        passed=passed,
-        detail=detail,
-        difference=difference,
-        permitted_maximum=required,
-    )
-
-
-def check_date_order(
-    earlier_label: str,
-    earlier: date,
-    later_label: str,
-    later: date,
-) -> DateVerdict:
-    """Check that one date falls on or before another, and report the gap in days.
-
-    Use for shipment date against latest shipment date, insurance effective date
-    against shipment date, and any other ordering the credit imposes.
-
-    Args:
-        earlier_label: Name of the date that must come first, e.g. 'shipment date'.
-        earlier: The date that must come first.
-        later_label: Name of the date that must come second, e.g. 'latest shipment date'.
-        later: The date that must come second.
-    """
-    days = (later - earlier).days
-    passed = days >= 0
-    detail = (
-        f'{earlier_label} {earlier.isoformat()} vs {later_label} {later.isoformat()}: '
-        f'{"within by" if passed else "late by"} {abs(days)} day(s)'
-    )
-    return DateVerdict(passed=passed, detail=detail, days_between=days)
-
-
-class PresentationVerdict(ToolVerdict):
-    """Result of the presentation-period check."""
-
-    deadline: date
-    """The last day a compliant presentation could be made."""
-
-    days_late: int = Field(default=0)
-    """Days past the deadline; 0 when the presentation was in time."""
-
-
-def check_presentation_period(
-    shipment_date: date,
-    expiry_date: date,
-    presented_on: date,
-    presentation_period_days: int = 21,
-) -> PresentationVerdict:
-    """Check that documents were presented in time.
-
-    Under UCP 600 Art 14(c) a presentation including a transport document must be
-    made no later than 21 calendar days after shipment, and in any case no later
-    than the credit's expiry date. The effective deadline is the earlier of the two.
-
-    Args:
-        shipment_date: The on-board date from the transport document.
-        expiry_date: The expiry date of the credit.
-        presented_on: The date the documents reached the bank.
-        presentation_period_days: The period the credit allows, defaulting to the
-            21 days UCP 600 applies when the credit is silent.
-    """
-    period_deadline = shipment_date + timedelta(days=presentation_period_days)
-    deadline = min(period_deadline, expiry_date)
-    days_late = max((presented_on - deadline).days, 0)
-    passed = days_late == 0
-    binding = 'expiry date' if deadline == expiry_date else f'{presentation_period_days}-day period'
-    detail = (
-        f'presented {presented_on.isoformat()} against deadline {deadline.isoformat()} '
-        f'(set by the {binding}): {"in time" if passed else f"late by {days_late} day(s)"}'
-    )
-    return PresentationVerdict(
-        passed=passed,
-        detail=detail,
-        deadline=deadline,
-        days_late=days_late,
-    )
-
-
-RECONCILIATION_TOOLS = [
-    check_amount_tolerance,
-    check_insurance_coverage,
-    check_date_order,
-    check_presentation_period,
-]
-"""Registered on the reconciliation agent; see `Detector.services.agents`."""
 ```
 
 Registering them is one argument on the agent. Pydantic AI derives each tool's JSON schema from the
 signature and its description from the docstring — **the `Args:` section becomes the per-parameter
 descriptions**, which is why these docstrings cite UCP articles. They're written for the model.
 
-**Run on this case's real extracted values, these are the actual verdicts — no model involved:**
+**Run on this case's real extracted values — no model involved:**
 
 ```python
 check_amount_tolerance(Decimal('250000.00'), Decimal('268400.00'), Decimal('5'))
@@ -1724,13 +1185,15 @@ check_presentation_period(date(2026, 2, 24), date(2026, 3, 15), date(2026, 3, 2)
 # 'presented 2026-03-02 against deadline 2026-03-15 (set by the expiry date): in time'
 ```
 
-Two things to notice. **The tools return the numbers, not just yes/no** — that `detail` string is
-built to be quoted straight into a finding, which is why the report can say "over by USD 5,900.00"
-and be exactly right. And **the third check passes, and says which rule bound it**: 02-24 + 21 days
-is 03-17, but the credit expires 03-15, so expiry binds; they presented on 03-02, comfortably in
-time. That Art 14(c) rule lives in code, not in a prompt, so it can't drift.
+Two things to notice:
 
-### The agent — `Detector/services/agents.py`
+- **The tools return the numbers, not just yes/no.** That `detail` string is built to be quoted
+  straight into a finding, which is why the report can say "over by USD 5,900.00" and be exactly right.
+- **The third check passes, and says which rule bound it.** 02-24 + 21 days is 03-17, but the credit
+  expires 03-15, so expiry binds; they presented on 03-02, comfortably in time. That Art 14(c) rule
+  lives in code, not in a prompt, so it can't drift.
+
+### The agent — [`Detector/services/agents.py`](Detector/services/agents.py)
 
 ```python
 reconciler = Agent(
@@ -1740,43 +1203,51 @@ reconciler = Agent(
     instructions=prompts.reconciliation,
     tools=RECONCILIATION_TOOLS,
     retries=settings.retries,
-    model_settings=_model_settings(
-        model=settings.reconciliation_model,
-        thinking=settings.reconciliation_thinking,
-        max_tokens=settings.reconciliation_max_tokens,
-        cache_instructions=settings.cache_instructions,
-    ),
+    model_settings=_model_settings(...),
 )
 ```
 
-`reconciliation_thinking` defaults to `high` — this is the compliance judgement, the part worth
-spending reasoning budget on. Classification runs at `low`, extraction at `medium`.
+Reasoning budget is spent where the judgement is:
 
-### The output type — `Detector/models/reconciliation.py`
+| Stage | `thinking` |
+|---|---|
+| classification — pattern matching | `low` |
+| extraction — messy OCR, unlabelled fields | `medium` |
+| **reconciliation — the compliance judgement** | **`high`** |
+
+### The output type — [`Detector/models/reconciliation.py`](Detector/models/reconciliation.py)
+
+```mermaid
+classDiagram
+    class ReconciliationReport {
+        status: CaseStatus
+        summary: str
+        matched_fields: list[str]
+        missing_documents: list[DocumentType]
+        critical_count
+        warning_count
+    }
+    class Mismatch {
+        code: str
+        severity: Severity
+        field: str
+        explanation: str
+        rule_reference: str | None
+        suggested_action: str | None
+    }
+    class FieldObservation {
+        document_type: DocumentType
+        field: str
+        value: str | None
+        document_id: str | None
+    }
+    ReconciliationReport --> "0..*" Mismatch : mismatches
+    Mismatch --> "0..*" FieldObservation : observations
+```
 
 ```python
-class FieldObservation(BaseModel):
-    """One document's version of a field that is under comparison."""
-
-    model_config = ConfigDict(extra='forbid', use_attribute_docstrings=True)
-
-    document_type: DocumentType
-    """Which document this value was read from."""
-
-    field: str
-    """The field name on that document, e.g. 'beneficiary' or 'shipment_date'."""
-
-    value: str | None = None
-    """The value exactly as extracted, or null if the document omits it."""
-
-    document_id: str | None = None
-    """The id of the specific document, when more than one of a type was presented."""
-
-
 class Mismatch(BaseModel):
     """A single discrepancy between two or more presented documents."""
-
-    model_config = ConfigDict(extra='forbid', use_attribute_docstrings=True)
 
     code: str
     """Short stable slug for this kind of discrepancy, e.g. 'late_shipment'."""
@@ -1791,8 +1262,6 @@ class Mismatch(BaseModel):
     """Plain language a bank ops person would understand: what disagrees and why it matters."""
 
     documents_involved: list[DocumentType] = Field(default_factory=list)
-    """Every document family that takes part in this discrepancy."""
-
     observations: list[FieldObservation] = Field(default_factory=list)
     """The conflicting values, one entry per document."""
 
@@ -1801,44 +1270,13 @@ class Mismatch(BaseModel):
 
     suggested_action: str | None = None
     """What the beneficiary or the bank would do to cure it."""
-
-
-class ReconciliationReport(BaseModel):
-    """The reconciliation agent's verdict over a full presentation."""
-
-    model_config = ConfigDict(extra='forbid', use_attribute_docstrings=True)
-
-    status: CaseStatus
-    """blocked if any critical finding, needs_review if only warnings, else clean."""
-
-    summary: str
-    """Two or three sentences an examiner can read before opening the detail."""
-
-    mismatches: list[Mismatch] = Field(default_factory=list)
-    """Every discrepancy found, most severe first."""
-
-    matched_fields: list[str] = Field(default_factory=list)
-    """Fields that were cross-checked and agreed across documents."""
-
-    missing_documents: list[DocumentType] = Field(default_factory=list)
-    """Document families the credit appears to require but that were not presented."""
-
-    @property
-    def critical_count(self) -> int:
-        """How many findings would cause the bank to refuse."""
-        return sum(1 for m in self.mismatches if m.severity is Severity.CRITICAL)
-
-    @property
-    def warning_count(self) -> int:
-        """How many findings need a human examiner."""
-        return sum(1 for m in self.mismatches if m.severity is Severity.WARNING)
 ```
 
 `code` is a stable slug so you can aggregate across thousands of cases (*what do we get refused for
 most often?*). `observations` carries the conflicting values themselves, so a UI can show the
 disagreement side by side rather than making the user re-open both PDFs.
 
-### The step — `Detector/services/graph.py`
+### The step — [`Detector/services/graph.py`](Detector/services/graph.py)
 
 ```python
 @builder.step
@@ -1855,15 +1293,10 @@ async def reconcile(
         state.record("reconcile", "no usable extractions; skipped the compliance check")
     else:
         result = await ctx.deps.agents.reconciler.run(
-            _reconciliation_prompt(state, usable),
-            usage_limits=ctx.deps.usage_limits,
+            _reconciliation_prompt(state, usable), usage_limits=ctx.deps.usage_limits
         )
         report = _finalise_report(result.output, documents)
-        state.record(
-            "reconcile",
-            f"{report.status.value}: {report.critical_count} critical, {report.warning_count} warning",
-            usage=result.usage,
-        )
+        state.record("reconcile", f"{report.status.value}: ...", usage=result.usage)
 
     return CaseResult(
         case_id=state.case_id,
@@ -1893,25 +1326,24 @@ out: CaseResult(status=BLOCKED, report=ReconciliationReport(...), documents=[...
 
 ## 9. The status rule
 
-**What happens:** the code throws away the model's verdict and derives its own.
-
-**In plain words.** The model is asked for a verdict, and then the code ignores its answer and works
-the verdict out itself. Not because the model is usually wrong — but because "is this blocked?" is a
+**The idea.** The model is asked for a verdict, and then the code ignores its answer and works the
+verdict out itself. Not because the model is usually wrong — but because "is this blocked?" is a
 lookup, not an opinion, and a lookup should never be left to something capable of having an off day.
 
-The entire rule:
-
-| If the findings contain… | Verdict |
-|---|---|
-| any `critical` | `blocked` |
-| otherwise, any `warning` | `needs_review` |
-| otherwise | `clean` |
+```mermaid
+flowchart TD
+    F(["the findings"]) --> Q1{"any critical?"}
+    Q1 -->|yes| B["blocked"]
+    Q1 -->|no| Q2{"any warning?"}
+    Q2 -->|yes| N["needs_review"]
+    Q2 -->|no| C["clean"]
+```
 
 Three lines of Python, and the most load-bearing function in the project. It is the difference between
-a system whose worst case is *"flagged something it needn't have"* and one whose worst case is
-*"told a bank that a discrepant presentation was clean"*.
+a system whose worst case is *"flagged something it needn't have"* and one whose worst case is *"told
+a bank that a discrepant presentation was clean"*.
 
-### The code — `Detector/services/graph.py`
+### The code — [`Detector/services/graph.py`](Detector/services/graph.py)
 
 ```python
 def _derive_status(mismatches: Sequence[Mismatch]) -> CaseStatus:
@@ -1930,8 +1362,7 @@ def _derive_status(mismatches: Sequence[Mismatch]) -> CaseStatus:
 
 
 def _finalise_report(
-    report: ReconciliationReport,
-    documents: Sequence[ExtractedDocument],
+    report: ReconciliationReport, documents: Sequence[ExtractedDocument]
 ) -> ReconciliationReport:
     """Sort the findings, enforce the status rule, and flag unreadable documents."""
     mismatches = sorted(report.mismatches, key=lambda m: _SEVERITY_ORDER[m.severity])
@@ -1958,9 +1389,7 @@ def _finalise_report(
     )
 ```
 
-Mapping findings to a verdict is **a rule, not a judgement**, so the rule wins. A report that lists a
-critical finding and claims `clean` comes back `blocked`, every time. This is a small function, and
-it is the most important one in the project — the line between a system a bank can use and a demo.
+A report that lists a critical finding and claims `clean` comes back `blocked`, every time.
 
 `_finalise_report` also appends a warning for any document that failed to extract, so an unreadable
 scan can't quietly shrink the evidence base without the examiner being told:
@@ -1972,40 +1401,21 @@ scan can't quietly shrink the evidence base without the examiner being told:
 
 ### And when nothing could be read at all
 
-```python
-def _no_evidence_report(documents: Sequence[ExtractedDocument]) -> ReconciliationReport:
-    """The verdict when nothing could be extracted, so there is nothing to compare."""
-    detail = (
-        "No documents were presented."
-        if not documents
-        else f"None of the {len(documents)} presented document(s) could be read into structured fields."
-    )
-    return ReconciliationReport(
-        status=CaseStatus.NEEDS_REVIEW,
-        summary=f"{detail} No cross-document checks were performed.",
-        mismatches=[
-            Mismatch(
-                code="no_usable_documents",
-                severity=Severity.WARNING,
-                field="document set",
-                explanation=detail,
-                documents_involved=[DocumentType.UNKNOWN],
-                suggested_action="Check the uploads and the text extraction step, then resubmit.",
-            )
-        ],
-    )
-```
+The model is never called. `_no_evidence_report` returns `needs_review` with a single
+`no_usable_documents` warning — because "we compared nothing and found nothing wrong" must never look
+like `clean`.
 
 ---
 
 ## 10. The output
 
-**In plain words.** Four findings, sorted worst-first. Three are real problems; the fourth is the trap
-— the one a naive field-by-field comparison would report and be wrong about. Each finding carries the
-field that disagrees, which documents disagree about it, the UCP 600 article it rests on, and what to
-do about it, because "discrepancy found" without a cure is just an obstacle.
+Four findings, sorted worst-first. Three are real problems; the fourth is the trap — the one a naive
+field-by-field comparison would report and be wrong about.
 
-### Finding 1 — the invoice is drawn over the credit · CRITICAL
+Each finding carries the field that disagrees, which documents disagree about it, the UCP 600 article
+it rests on, and what to do about it — because "discrepancy found" without a cure is just an obstacle.
+
+### Finding 1 — the invoice is drawn over the credit · `CRITICAL`
 
 | Document | Field | Value |
 |---|---|---|
@@ -2018,7 +1428,7 @@ The tolerance gives a ceiling of USD 262,500.00. The invoice is over by **USD 5,
 ("+/- 5 PCT"), and the invoice still breaks it.
 **Cure:** amend the credit, or present an invoice within the ceiling.
 
-### Finding 2 — late shipment · CRITICAL
+### Finding 2 — late shipment · `CRITICAL`
 
 | Document | Field | Value |
 |---|---|---|
@@ -2030,7 +1440,7 @@ Four days late. The goods went on board after the last date the credit permits.
 *UCP 600 Art 20* — the on-board date is the date of shipment.
 **Cure:** request an amendment extending the latest shipment date.
 
-### Finding 3 — wrong port of discharge · CRITICAL
+### Finding 3 — wrong port of discharge · `CRITICAL`
 
 | Document | Field | Value |
 |---|---|---|
@@ -2043,7 +1453,7 @@ wrong country.
 *UCP 600 Art 20(a)(ii)*
 **Cure:** obtain a corrected bill of lading, or amend the credit.
 
-### Finding 4 — the red herring · INFO
+### Finding 4 — the red herring · `INFO`
 
 The bill of lading says "cotton knitted t-shirts" where the credit says "**100%** cotton knitted
 t-shirts". This looks like a discrepancy and **is not one.**
@@ -2065,7 +1475,7 @@ beneficiary / seller / shipper  ·  applicant / buyer  ·  LC number quoted on t
 Worth reporting: it tells the examiner what was actually checked, so silence on a field means "we
 looked" rather than "we forgot".
 
-### The returned object — `Detector/models/reconciliation.py`
+### The returned object — [`Detector/models/reconciliation.py`](Detector/models/reconciliation.py)
 
 ```python
 class CaseResult(BaseModel):
@@ -2099,14 +1509,10 @@ them need the buyer's agreement to amend the credit.
 
 ---
 
-## 11. The whole graph in one place
+## 11. The wiring
 
-Every step above is wired together here — and validated at **import time**, so a miswired graph fails
-when the module loads rather than on the first request in production.
-
-**In plain words.** None of the steps above wired themselves up. This is where they get connected, and
-it happens as the module loads — so a bad edge (a step nothing feeds, a join with no fork above it)
-blows up at deploy time, not on a customer's first request.
+Every step above is connected here — and validated at **import time**, so a miswired graph fails when
+the module loads rather than on the first request in production.
 
 The wiring reads as six sentences:
 
@@ -2131,12 +1537,7 @@ builder = GraphBuilder(
 EXTRACTION_STEPS: tuple[Step[CaseState, DetectorDeps, Any, ExtractedDocument], ...] = (
     extract_letter_of_credit,
     extract_commercial_invoice,
-    extract_bill_of_lading,
-    extract_packing_list,
-    extract_certificate_of_origin,
-    extract_insurance_certificate,
-    extract_bill_of_exchange,
-    extract_inspection_certificate,
+    # ... six more ...
     skip_unclassified,
 )
 """Everything that can feed the join. Ordering only affects the rendered diagram."""
@@ -2164,10 +1565,10 @@ The four type parameters on `GraphBuilder` mean different things:
 |---|---|---|
 | `input_type` | What the graph is called with | — |
 | `output_type` | What the graph returns | — |
-| `deps_type` | Injected services, same for the whole run | No (frozen dataclass) |
+| `deps_type` | Injected services, same for the whole run | No — frozen dataclass |
 | `state_type` | Scratchpad the run accumulates | Yes |
 
-### State and deps — `Detector/services/deps.py`
+### State and deps — [`Detector/services/deps.py`](Detector/services/deps.py)
 
 ```python
 @dataclass(slots=True)
@@ -2186,27 +1587,11 @@ class CaseState:
     events: list[StageEvent] = field(default_factory=list)
     """Ordered audit trail; safe to stream to the client as it grows."""
 
-    def record(
-        self,
-        stage: str,
-        message: str,
-        *,
-        document_id: str | None = None,
-        document_type: DocumentType | None = None,
-        usage: RunUsage | None = None,
-    ) -> None:
+    def record(self, stage: str, message: str, *, ..., usage: RunUsage | None = None) -> None:
         """Append an audit event and fold in the usage of the call that produced it."""
         if usage is not None:
             self.usage.incr(usage)
-        self.events.append(
-            StageEvent(
-                stage=stage,
-                message=message,
-                at=datetime.now(UTC),
-                document_id=document_id,
-                document_type=document_type,
-            )
-        )
+        self.events.append(StageEvent(stage=stage, message=message, at=datetime.now(UTC), ...))
 
 
 @dataclass(frozen=True, slots=True)
@@ -2219,7 +1604,8 @@ class DetectorDeps:
     """Applied per agent run, not per case."""
 ```
 
-`record()` contains no `await`, which is why concurrent branches can call it without a lock.
+`record()` contains no `await`, which is why concurrent lanes can call it without a lock. That same
+event list is what `run_with_progress()` streams to a websocket as the run happens.
 
 ### The rendered graph
 
