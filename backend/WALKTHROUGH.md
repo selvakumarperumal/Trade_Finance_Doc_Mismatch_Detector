@@ -25,6 +25,7 @@ the domain; everything after that is Python.
 | [Part 4 — Complete symbol reference](#part-4--complete-symbol-reference) | All 72 names the notebook defines |
 | [Part 5 — Design decisions](#part-5--design-decisions) | The five choices worth arguing about |
 | [Part 6 — Extending and troubleshooting](#part-6--extending-and-troubleshooting) | Adding a family, common failures |
+| [Appendix — the whole graph in one picture](#appendix--the-whole-graph-in-one-picture) | Every moving part on one page |
 
 ---
 
@@ -176,6 +177,10 @@ stateDiagram-v2
 
 That diagram is not drawn by hand. It is `case_graph.render()` — generated from the
 wiring in [§11.6](#116--wiring-it-together), so it cannot drift out of date.
+
+It is the skeleton. Each subsection of [§11](#11-the-graph) draws the one node it
+covers, and the [appendix](#appendix--the-whole-graph-in-one-picture) puts the agents,
+the tools and the state back on top of it.
 
 ### Why not one big prompt?
 
@@ -1150,6 +1155,21 @@ path.
 `collect` is a **join**: it waits for every fan-out branch and reduces their outputs
 with `reduce_list_append` into a `list[ExtractedDocument]`, in completion order.
 
+The four type parameters and the two named ids, in one picture:
+
+```mermaid
+flowchart LR
+  IN["CaseInput<br>input_type"] --> B
+  ST["CaseState<br>state_type"] --> B
+  DP["DetectorDeps<br>deps_type"] --> B
+  B["GraphBuilder<br>mini_trade_finance_detector"] --> OUT["CaseResult<br>output_type"]
+  B --> FORK["FAN_OUT_ID · ForkID<br>fan_out_documents"]
+  B --> JOIN["COLLECT_ID · JoinID<br>collect_extractions"]
+  FORK -- "one branch per document" --> JOIN
+  FORK -. "downstream_join_id<br>zero documents still arrive" .-> JOIN
+  JOIN --> RED["reduce_list_append<br>initial_factory: empty list<br>appends in completion order"]
+```
+
 #### Prompt construction
 
 ```python
@@ -1219,6 +1239,21 @@ absence and forbids the finding.
 than deep JSON. `classification_confidence` is included so the reconciler can weigh a
 0.55-confidence extraction differently from a 0.99 one.
 
+Both prompt builders, and who consumes them:
+
+```mermaid
+flowchart LR
+  RAW["RawDocument"] --> DOCP["_document_prompt"]
+  DOCP --> WRAP["document_id + filename<br>declared_type as a hint only<br>text fenced in document_text tags"]
+  WRAP --> CLS["classify"]
+  WRAP --> EXT["_extract"]
+
+  STATE["CaseState<br>case_id · presented_on · notes"] --> RECP["_reconciliation_prompt"]
+  USABLE["usable ExtractedDocument list<br>structured fields, never raw text"] --> RECP
+  RECP --> EV["case header<br>presented_on, or 'do not assume a date'<br>'use the deterministic tools'<br>format_as_xml evidence"]
+  EV --> REC["reconcile"]
+```
+
 #### 11.1 — `ingest`
 
 ```python
@@ -1255,6 +1290,21 @@ deliberate: a malformed *case* is a caller error and should fail loudly, while a
 malformed *document* inside a valid case is an expected condition to be reported.
 
 `ctx` carries `state`, `deps` and `inputs`, all typed by the `StepContext` parameters.
+
+Three gates and one way through:
+
+```mermaid
+flowchart TD
+  STARTN(["start_node"]) --> ING["ingest"]
+  ING --> C1{"count ≤ deps.max_documents_per_case"}
+  C1 -- no --> FAIL["raise ValueError<br>the whole case fails"]
+  C1 -- yes --> C2{"every text ≤ deps.max_document_chars"}
+  C2 -- no --> FAIL
+  C2 -- yes --> C3{"every text non-empty"}
+  C3 -- no --> FAIL
+  C3 -- yes --> OKN["state.record 'ingest'<br>return the RawDocument list"]
+  OKN --> FO["fan_out_documents"]
+```
 
 #### 11.2 — `classify`
 
@@ -1328,6 +1378,26 @@ report as something a human should look at.
 The `cast` is required because `ROUTED_DOCUMENT_TYPES` is typed `type[RoutedDocument]`
 (the base), while the return type is the narrower union — the dict lookup is correct
 by construction but not provably so to a type checker.
+
+Three ways out, and every one of them but the re-raise produces a `RoutedDocuments`:
+
+```mermaid
+flowchart TD
+  RAW["RawDocument<br>one fan-out branch"] --> RUN["deps.classifier.run<br>_document_prompt"]
+  RUN -- "UsageLimitExceeded<br>RunCancelled" --> RERAISE["re-raise<br>the whole run stops"]
+  RUN -- "AgentRunError" --> U1["UnclassifiedDoc<br>confidence 0.0"]
+  RUN -- "Classification" --> THR{"confidence ≥ deps.min_classification_confidence"}
+  THR -- no --> U2["UnclassifiedDoc<br>model confidence kept"]
+  THR -- yes --> TBL["ROUTED_DOCUMENT_TYPES lookup"]
+  TBL --> LC["LetterOfCreditDoc"]
+  TBL --> CI["CommercialInvoiceDoc"]
+  TBL --> BL["BillOfLadingDoc"]
+  LC --> UNION["RoutedDocuments<br>→ route_by_document_type"]
+  CI --> UNION
+  BL --> UNION
+  U1 --> UNION
+  U2 --> UNION
+```
 
 #### 11.3 — the extractors
 
@@ -1418,6 +1488,28 @@ The fourth branch, and the one that is easy to get wrong. An unrecognised docume
 warning about it. Silently discarding it would produce a clean report on an incomplete
 presentation — the worst possible failure for this system.
 
+Four branches, one shared body, one output type:
+
+```mermaid
+flowchart TD
+  DEC{"route_by_document_type<br>matches on the envelope class"}
+  DEC -- LetterOfCreditDoc --> S1["extract_letter_of_credit"]
+  DEC -- CommercialInvoiceDoc --> S2["extract_commercial_invoice"]
+  DEC -- BillOfLadingDoc --> S3["extract_bill_of_lading"]
+  DEC -- UnclassifiedDoc --> S4["skip_unclassified<br>no model call"]
+  S1 --> SH["_extract<br>one shared body, document_type closed over"]
+  S2 --> SH
+  S3 --> SH
+  SH --> RUN["deps.extractors document_type .run"]
+  RUN -- "UsageLimitExceeded / RunCancelled" --> STOP["re-raise"]
+  RUN -- "AgentRunError" --> BAD["ExtractedDocument<br>payload None + error"]
+  RUN -- "payload" --> GOOD["ExtractedDocument<br>payload set"]
+  S4 --> SKIP["ExtractedDocument<br>type unknown, payload None<br>not dropped"]
+  GOOD --> J["collect_extractions"]
+  BAD --> J
+  SKIP --> J
+```
+
 #### 11.4 — the rule that overrides the model
 
 ```python
@@ -1500,6 +1592,28 @@ The empty-evidence verdict, built in Python without a model call. Status is
 `needs_review`, never `clean` — "we checked nothing" must never look like "we checked
 everything and it was fine".
 
+The three pure functions, and the order that makes the appended warning count:
+
+```mermaid
+flowchart TD
+  MODEL["ReconciliationReport from the model"] --> FIN["_finalise_report"]
+  ALL["every ExtractedDocument<br>usable or not"] --> FIN
+  FIN --> SORT["sort mismatches by _SEVERITY_ORDER"]
+  SORT --> UNQ{"any document with is_usable False"}
+  UNQ -- yes --> WARN["append document_not_extracted<br>WARNING · re-sort"]
+  UNQ -- no --> DER
+  WARN --> DER["_derive_status<br>runs last, over the final list"]
+  DER --> Q1{"any CRITICAL"}
+  Q1 -- yes --> BLK["blocked"]
+  Q1 -- no --> Q2{"any WARNING"}
+  Q2 -- yes --> NR["needs_review"]
+  Q2 -- no --> CLN["clean"]
+  BLK --> COPY["model_copy update<br>a new report, the original intact"]
+  NR --> COPY
+  CLN --> COPY
+  NOEV["_no_evidence_report<br>nothing usable, no model call"] --> NRW["needs_review<br>+ no_usable_documents warning<br>never clean"]
+```
+
 #### 11.5 — `reconcile`
 
 ```python
@@ -1542,6 +1656,22 @@ and the report stable across runs, so two runs of the same case are diffable.
 
 Only `usable` documents go into the prompt, but *all* `documents` go to
 `_finalise_report` — that is how unreadable ones still earn their warning.
+
+The last step end to end:
+
+```mermaid
+flowchart TD
+  J["collect_extractions<br>ExtractedDocument list, completion order"] --> RC["reconcile"]
+  RC --> SRT["sorted by document_id<br>two runs of one case stay diffable"]
+  SRT --> U{"any usable document"}
+  U -- no --> NOEV["_no_evidence_report<br>no model call"]
+  U -- yes --> RUN["deps.reconciler.run<br>_reconciliation_prompt over usable only"]
+  RUN <--> TOOLS["check_amount_tolerance<br>check_date_order<br>check_presentation_period"]
+  RUN --> FIN["_finalise_report<br>over all documents"]
+  NOEV --> RES
+  FIN --> RES["CaseResult<br>case_id · status · report<br>documents · started_at · completed_at"]
+  RES --> ENDN(["end_node"])
+```
 
 #### 11.6 — wiring it together
 
@@ -1611,6 +1741,28 @@ print(case_graph.render())
 
 Emits the mermaid diagram in [Part 2](#part-2--the-shape-of-a-run) — generated from
 the wiring, so it cannot drift.
+
+The same six edges, labelled with what travels along each one. The dotted line is
+the empty-case path — real wiring, but a `downstream_join_id` rather than an edge, so
+it does not appear in the rendered diagram:
+
+```mermaid
+flowchart TD
+  STARTN(["builder.start_node"]) -->|CaseInput| ING["ingest"]
+  ING -->|"per document · map, fork FAN_OUT_ID"| CLS["classify"]
+  CLS -->|RoutedDocuments| DEC{"route_by_document_type"}
+  DEC --> E1["extract_letter_of_credit"]
+  DEC --> E2["extract_commercial_invoice"]
+  DEC --> E3["extract_bill_of_lading"]
+  DEC --> E4["skip_unclassified"]
+  E1 --> COL
+  E2 --> COL
+  E3 --> COL
+  E4 --> COL
+  ING -. "downstream_join_id · empty case" .-> COL
+  COL["collect_extractions"] -->|"all documents"| REC["reconcile"]
+  REC -->|CaseResult| ENDN(["builder.end_node"])
+```
 
 ### 12. A sample case
 
@@ -2040,3 +2192,83 @@ decision does not cover. That is the §5 design paying for itself.
 The production package adds what a notebook has no room for: a shared concurrency
 limiter across all stages, per-run usage and cost budgets, Logfire tracing, and
 persistence. The architecture in this notebook is unchanged by any of it.
+
+
+---
+
+## Appendix — the whole graph in one picture
+
+[Part 2](#part-2--the-shape-of-a-run) shows the nodes and nothing else, because that is
+what `case_graph.render()` knows about. This one adds the three things the renderer
+cannot see: which agent each node reaches for, where the deterministic tools enter, and
+what every node writes to `CaseState` on the way past.
+
+```mermaid
+flowchart TB
+  subgraph ONCE["Built once — §8, §10"]
+    direction TB
+    PR["PROMPTS<br>classifier · 3 extractors · reconciliation"]
+    MD["FAST_MODEL flash · REASONING_MODEL pro<br>'test' when no API key"]
+    TL["RECONCILIATION_TOOLS<br>check_amount_tolerance<br>check_date_order<br>check_presentation_period"]
+    PR --> DEPS
+    MD --> DEPS
+    TL --> DEPS
+    DEPS["DetectorDeps · frozen<br>classifier · extractors by DocumentType · reconciler<br>min_classification_confidence 0.5<br>max_documents_per_case 25 · max_document_chars 120k"]
+  end
+
+  subgraph PIPE["case_graph — one run per case"]
+    direction TB
+    CI2["CaseInput<br>case_id · RawDocument list · presented_on"] --> ING["ingest<br>three gates · raises on a bad case"]
+    ING -->|"per document, concurrent"| CLS["classify<br>flash · Classification"]
+    CLS --> DEC{"route_by_document_type<br>dispatch on envelope class"}
+    DEC -- LetterOfCreditDoc --> X1["extract_letter_of_credit<br>flash"]
+    DEC -- CommercialInvoiceDoc --> X2["extract_commercial_invoice<br>flash"]
+    DEC -- BillOfLadingDoc --> X3["extract_bill_of_lading<br>flash"]
+    DEC -- UnclassifiedDoc --> X4["skip_unclassified<br>Python only"]
+    X1 --> COL
+    X2 --> COL
+    X3 --> COL
+    X4 --> COL
+    ING -. "empty case" .-> COL
+    COL["collect_extractions<br>join · reduce_list_append"] -->|"all documents"| REC["reconcile<br>pro · ReconciliationReport"]
+    REC --> RULE["_finalise_report → _derive_status<br>Python overrides the model's status"]
+    RULE --> RES["CaseResult<br>status · report · documents · timings"]
+  end
+
+  subgraph STBOX["CaseState — one per run"]
+    direction TB
+    EVT["events: append-only audit trail<br>ingest → classify → extract → skip → reconcile"]
+  end
+
+  DEPS -.->|ctx.deps| ING
+  DEPS -.-> CLS
+  DEPS -.-> X1
+  DEPS -.-> X3
+  DEPS -.-> REC
+  ING -.->|ctx.state.record| EVT
+  CLS -.-> EVT
+  X1 -.-> EVT
+  X4 -.-> EVT
+  REC -.-> EVT
+```
+
+Read it in three passes.
+
+**Down the middle — the data.** A `CaseInput` becomes a list of `RawDocument`, each of
+those becomes one `RoutedDocuments` envelope, each envelope becomes one
+`ExtractedDocument`, the join turns those back into a list, and reconciliation turns the
+list into one `CaseResult`. Every arrow is a type change, and every type is declared in
+§2–§6.
+
+**Left to right — the money.** Only four node kinds call a model: one `classify` and one
+extractor per document on the cheap model, and exactly one `reconcile` on the expensive
+one. `skip_unclassified`, both rule functions and the three tools are ordinary Python
+and cost nothing. The fan-out is the only place the count scales with the number of
+documents.
+
+**The dotted edges — what is not on the happy path.** `deps` is read at run time rather
+than captured at wiring time, which is what lets one set of agents serve every case
+concurrently. `state.record` runs at every stage, so the audit trail is complete even
+for a case that ends in `needs_review` with no evidence. And the `empty case` line is
+the reason a presentation with zero readable documents still produces a report instead
+of a hung graph.
