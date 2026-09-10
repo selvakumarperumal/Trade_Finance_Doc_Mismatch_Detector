@@ -1,5 +1,11 @@
-"""System prompts, loaded from `Config/prompts.yaml`."""
+"""The system prompts, loaded and validated from `Config/prompts.yaml`."""
 
-from Detector.prompts.registry import PromptRegistry, get_prompts
+from Detector.prompts.registry import (
+    CLASSIFIER,
+    RECONCILIATION,
+    extractor,
+    get_prompts,
+    load_prompts,
+)
 
-__all__ = ['PromptRegistry', 'get_prompts']
+__all__ = ['CLASSIFIER', 'RECONCILIATION', 'extractor', 'get_prompts', 'load_prompts']

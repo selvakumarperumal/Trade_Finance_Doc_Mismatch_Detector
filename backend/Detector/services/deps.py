@@ -14,7 +14,9 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 from Detector.core.config import Settings, get_settings
 from Detector.models.documents import CaseInput, TokenUsage
 from Detector.models.enums import DocumentType
-from Detector.services.agents import AgentRegistry, get_agents
+from Detector.prompts.registry import get_prompts
+from Detector.services.agents import AgentRegistry, build_agents, get_agents
+from Detector.services.ocr import TextractOCR
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,14 +93,35 @@ class DetectorDeps:
     usage_limits: UsageLimits | None = None
     """Applied per agent run, not per case."""
 
+    textract: TextractOCR | None = None
+    """The OCR client, shared by every branch of the fan-out.
+
+    `None` means documents must arrive with their text already extracted; the OCR step
+    then fails those documents individually instead of the whole case. It is not built
+    here because opening the client needs an `await` — see `DetectorPipeline.open`.
+    """
+
     @classmethod
-    def default(cls) -> DetectorDeps:
-        """Build deps from the process-wide settings, prompts and agents."""
-        settings = get_settings()
+    def default(
+        cls,
+        textract: TextractOCR | None = None,
+        settings: Settings | None = None,
+    ) -> DetectorDeps:
+        """Build deps from the process-wide settings, prompts and agents.
+
+        Passing `settings` explicitly builds a fresh agent registry from it, rather than
+        reusing the cached process-wide one — otherwise the argument would be a lie, and
+        a test or a second deployment shape could not change the models.
+        """
+        if settings is None:
+            settings, agents = get_settings(), get_agents()
+        else:
+            agents = build_agents(settings, get_prompts())
         return cls(
-            agents=get_agents(),
+            agents=agents,
             settings=settings,
             usage_limits=build_usage_limits(settings),
+            textract=textract,
         )
 
 

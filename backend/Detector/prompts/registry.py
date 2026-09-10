@@ -1,8 +1,12 @@
-"""Loads the system prompts from `Config/prompts.yaml` and hands them to the agents.
+"""Loads the system prompts from `Config/prompts.yaml`.
 
-Prompts live in YAML so an ops or compliance reviewer can change the wording of a
-check without touching Python. The registry validates on load, so a typo in the
-YAML fails at startup rather than on the first request.
+Prompts live in YAML so an ops or compliance reviewer can reword a check without
+touching Python, and are validated on load, so a typo fails at startup rather than on
+the first request.
+
+Every key is derivable from the document types — `classifier`, `reconciliation`, and
+`<document_type>_extractor` — so there is no table here mapping one naming scheme onto
+another. Adding a document family means adding its prompt under the matching name.
 """
 
 from __future__ import annotations
@@ -17,88 +21,53 @@ import yaml
 from Detector.core.config import get_settings
 from Detector.models.enums import DocumentType
 
-CLASSIFIER_PROMPT: Final = 'classifier'
-RECONCILIATION_PROMPT: Final = 'reconciliation_engine'
+CLASSIFIER: Final = 'classifier'
+RECONCILIATION: Final = 'reconciliation'
 
-EXTRACTOR_PROMPTS: Final[Mapping[DocumentType, str]] = {
-    DocumentType.LETTER_OF_CREDIT: 'lc_extractor',
-    DocumentType.COMMERCIAL_INVOICE: 'invoice_extractor',
-    DocumentType.BILL_OF_LADING: 'bol_extractor',
-    DocumentType.PACKING_LIST: 'packing_list_extractor',
-    DocumentType.CERTIFICATE_OF_ORIGIN: 'certificate_of_origin_extractor',
-    DocumentType.INSURANCE_CERTIFICATE: 'insurance_certificate_extractor',
-    DocumentType.BILL_OF_EXCHANGE: 'bill_of_exchange_extractor',
-    DocumentType.INSPECTION_CERTIFICATE: 'inspection_certificate_extractor',
-}
-"""Which `system_prompts` key drives each document family's extractor."""
 
-REQUIRED_PROMPTS: Final[frozenset[str]] = frozenset(
-    {CLASSIFIER_PROMPT, RECONCILIATION_PROMPT, *EXTRACTOR_PROMPTS.values()}
+def extractor(document_type: DocumentType) -> str:
+    """The prompt name for one document family's extractor."""
+    return f'{document_type.value}_extractor'
+
+
+REQUIRED: Final[frozenset[str]] = frozenset(
+    {CLASSIFIER, RECONCILIATION}
+    | {extractor(t) for t in DocumentType if t is not DocumentType.UNKNOWN}
 )
+"""Every prompt the agents need. Anything else in the file is ignored."""
 
 
-class PromptRegistry:
-    """The system prompts, keyed by the names used in `Config/prompts.yaml`."""
+def load_prompts(path: Path) -> dict[str, str]:
+    """Read and validate the prompts file.
 
-    __slots__ = ('_prompts',)
+    Raises:
+        FileNotFoundError: no file at `path`.
+        ValueError: the file is not shaped like a prompts file, or a required prompt is
+            missing or blank.
+    """
+    try:
+        raw = yaml.safe_load(path.read_text(encoding='utf-8'))
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f'prompts file not found at {path}') from exc
 
-    def __init__(self, prompts: Mapping[str, str]) -> None:
-        missing = REQUIRED_PROMPTS - prompts.keys()
-        if missing:
-            raise ValueError(f'prompts file is missing required system prompts: {sorted(missing)}')
-        blank = sorted(name for name in REQUIRED_PROMPTS if not prompts[name].strip())
-        if blank:
-            raise ValueError(f'prompts file has empty system prompts: {blank}')
-        self._prompts = dict(prompts)
+    prompts = raw.get('system_prompts') if isinstance(raw, dict) else None
+    if not isinstance(prompts, dict):
+        # ValueError, not TypeError: the file's *contents* are wrong, which is a
+        # configuration problem, not a caller passing the wrong kind of argument.
+        raise ValueError(f"{path} must contain a 'system_prompts' mapping")  # noqa: TRY004
 
-    @classmethod
-    def from_yaml(cls, path: Path) -> PromptRegistry:
-        """Read the registry from a prompts YAML file."""
-        try:
-            raw = yaml.safe_load(path.read_text(encoding='utf-8'))
-        except FileNotFoundError as exc:
-            raise FileNotFoundError(f'prompts file not found at {path}') from exc
+    unusable = sorted(
+        name
+        for name in REQUIRED
+        if not isinstance(prompts.get(name), str) or not prompts[name].strip()
+    )
+    if unusable:
+        raise ValueError(f'{path} is missing or has blank system prompts: {unusable}')
 
-        if not isinstance(raw, dict):
-            raise ValueError(f'{path} must contain a mapping at the top level')
-
-        prompts = raw.get('system_prompts')
-        if not isinstance(prompts, dict):
-            raise ValueError(f"{path} must contain a 'system_prompts' mapping")
-
-        non_strings = sorted(key for key, value in prompts.items() if not isinstance(value, str))
-        if non_strings:
-            raise ValueError(f'{path}: system prompts must be strings, got non-strings for {non_strings}')
-
-        return cls(prompts)
-
-    def get(self, name: str) -> str:
-        """The prompt registered under `name`, stripped of trailing whitespace."""
-        try:
-            return self._prompts[name].strip()
-        except KeyError as exc:
-            raise KeyError(f'unknown system prompt {name!r}; known prompts: {sorted(self._prompts)}') from exc
-
-    @property
-    def classifier(self) -> str:
-        """The document classification prompt."""
-        return self.get(CLASSIFIER_PROMPT)
-
-    @property
-    def reconciliation(self) -> str:
-        """The documentary compliance prompt."""
-        return self.get(RECONCILIATION_PROMPT)
-
-    def extractor(self, document_type: DocumentType) -> str:
-        """The extraction prompt for one document family."""
-        try:
-            key = EXTRACTOR_PROMPTS[document_type]
-        except KeyError as exc:
-            raise KeyError(f'no extractor prompt for document type {document_type!r}') from exc
-        return self.get(key)
+    return {name: prompts[name].strip() for name in REQUIRED}
 
 
 @lru_cache(maxsize=1)
-def get_prompts() -> PromptRegistry:
-    """The process-wide prompt registry, loaded from the configured path."""
-    return PromptRegistry.from_yaml(get_settings().prompts_path)
+def get_prompts() -> Mapping[str, str]:
+    """The process-wide prompts, loaded from the configured path."""
+    return load_prompts(get_settings().prompts_path)

@@ -1,5 +1,13 @@
 """Trade finance document mismatch detector.
 
-The model layer only: `Detector.services.pipeline.get_pipeline()` returns the
-object an API route calls with a `CaseInput` to get a `CaseResult` back.
+Two layers, and they only meet in one place. `Detector.services` is the model layer:
+hand `DetectorPipeline` a `CaseInput`, get a `CaseResult` back, with no HTTP anywhere
+in sight. `Detector.api` is the FastAPI application that exposes it.
+
+```python
+from Detector.services.pipeline import DetectorPipeline
+
+async with DetectorPipeline.open() as pipeline:
+    result = await pipeline.run(case_input)
+```
 """

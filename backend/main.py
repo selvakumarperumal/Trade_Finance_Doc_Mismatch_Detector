@@ -1,7 +1,5 @@
-from fastapi import FastAPI
+"""ASGI entry point: `uvicorn main:app`."""
 
-app = FastAPI()
+from Detector.api.app import create_app
 
-@app.get("/health")
-def health():
-    return {"status": "Not Okay"}
+app = create_app()

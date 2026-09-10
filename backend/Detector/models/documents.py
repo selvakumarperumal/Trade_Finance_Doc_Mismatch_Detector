@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from datetime import date
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from Detector.models.enums import DocumentType
 from Detector.models.extractions import ExtractionPayload
@@ -55,16 +56,40 @@ class TokenUsage(BaseModel):
 
 
 class RawDocument(BaseModel):
-    """One uploaded document after text extraction, before the model sees it."""
+    """One uploaded document on its way to the agents.
+
+    It arrives either with `text` already extracted, or with the file itself in
+    `content` for the OCR step to read with Textract. The bytes are never stored:
+    they are read once and dropped, so every step after OCR sees one shape whichever
+    way the document came in.
+    """
 
     document_id: str
     """Stable identifier assigned by the caller (upload id, row id, ...)."""
 
-    text: str
-    """Plain text pulled out of the PDF/image. This is the only evidence the agents get."""
+    text: str = ''
+    """Plain text of the document — the only evidence the agents get. Empty means the
+    document has not been read yet."""
+
+    content: bytes | None = Field(default=None, repr=False, exclude=True)
+    """The file itself, for OCR. Dropped as soon as the OCR step has read it.
+
+    Excluded from serialisation: a presentation is megabytes of scanned paper, and
+    none of it belongs in an API response, a log line or a stored case record.
+    """
 
     filename: str | None = None
+
     page_count: int | None = None
+    """Pages the document turned out to have, filled in once it has been read."""
+
+    ocr_error: str | None = None
+    """Why `text` is still empty after the OCR step, when it is."""
+
+    @property
+    def needs_ocr(self) -> bool:
+        """Whether this document still has to be read before a model can see it."""
+        return not self.text.strip()
 
 
 class CaseInput(BaseModel):
@@ -75,6 +100,26 @@ class CaseInput(BaseModel):
     presented_on: date | None = None
     """The date the documents were presented to the bank, when known. Required for
     the UCP 600 Art 14(c) presentation-period check."""
+
+    @model_validator(mode='after')
+    def _document_ids_are_unique(self) -> CaseInput:
+        """Reject a case that presents two documents under the same id.
+
+        Every later stage keys on `document_id`: the audit trail, the per-document
+        result, and the observations the reconciler cites in a finding. Two documents
+        sharing an id makes a finding point at the wrong piece of paper, which is worse
+        than refusing the case.
+        """
+        counts = Counter(document.document_id for document in self.documents)
+        duplicates = sorted(name for name, count in counts.items() if count > 1)
+        if duplicates:
+            raise ValueError(f'duplicate document ids in case {self.case_id}: {duplicates}')
+        return self
+
+    @property
+    def total_bytes(self) -> int:
+        """How much file content this case is carrying, for the memory ceiling."""
+        return sum(len(d.content) for d in self.documents if d.content)
 
 
 class Classification(BaseModel):
@@ -96,89 +141,21 @@ class Classification(BaseModel):
 class RoutedDocument:
     """A classified document on its way to an extractor.
 
-    The subclasses below carry no extra data; they exist so the graph's
-    `Decision` node can dispatch on type instead of on a string comparison,
-    which makes the routing table exhaustively checkable by a type checker.
+    Which extractor is decided by `classification.document_type`; the graph builds one
+    branch per family from the same table it builds the extraction steps from, so there
+    is nothing here to keep in step with it.
     """
 
     raw: RawDocument
     classification: Classification
-    usage: TokenUsage = TokenUsage()
-    """What classifying this document cost, carried forward so the per-document
-    total in `ExtractedDocument` covers the whole branch, not just extraction."""
+    usage: TokenUsage = field(default_factory=TokenUsage)
+    """What classifying this document cost, carried forward so the per-document total in
+    `ExtractedDocument` covers the whole branch, not just extraction."""
 
-
-@dataclass(frozen=True, slots=True)
-class LetterOfCreditDoc(RoutedDocument):
-    """Routed to the LC extractor."""
-
-
-@dataclass(frozen=True, slots=True)
-class CommercialInvoiceDoc(RoutedDocument):
-    """Routed to the invoice extractor."""
-
-
-@dataclass(frozen=True, slots=True)
-class BillOfLadingDoc(RoutedDocument):
-    """Routed to the bill of lading extractor."""
-
-
-@dataclass(frozen=True, slots=True)
-class PackingListDoc(RoutedDocument):
-    """Routed to the packing list extractor."""
-
-
-@dataclass(frozen=True, slots=True)
-class CertificateOfOriginDoc(RoutedDocument):
-    """Routed to the certificate of origin extractor."""
-
-
-@dataclass(frozen=True, slots=True)
-class InsuranceCertificateDoc(RoutedDocument):
-    """Routed to the insurance certificate extractor."""
-
-
-@dataclass(frozen=True, slots=True)
-class BillOfExchangeDoc(RoutedDocument):
-    """Routed to the bill of exchange extractor."""
-
-
-@dataclass(frozen=True, slots=True)
-class InspectionCertificateDoc(RoutedDocument):
-    """Routed to the inspection certificate extractor."""
-
-
-@dataclass(frozen=True, slots=True)
-class UnclassifiedDoc(RoutedDocument):
-    """Not recognised as any known family; skips extraction."""
-
-
-type RoutedDocuments = (
-    LetterOfCreditDoc
-    | CommercialInvoiceDoc
-    | BillOfLadingDoc
-    | PackingListDoc
-    | CertificateOfOriginDoc
-    | InsuranceCertificateDoc
-    | BillOfExchangeDoc
-    | InspectionCertificateDoc
-    | UnclassifiedDoc
-)
-"""Every branch the routing decision must handle."""
-
-
-ROUTED_DOCUMENT_TYPES: dict[DocumentType, type[RoutedDocument]] = {
-    DocumentType.LETTER_OF_CREDIT: LetterOfCreditDoc,
-    DocumentType.COMMERCIAL_INVOICE: CommercialInvoiceDoc,
-    DocumentType.BILL_OF_LADING: BillOfLadingDoc,
-    DocumentType.PACKING_LIST: PackingListDoc,
-    DocumentType.CERTIFICATE_OF_ORIGIN: CertificateOfOriginDoc,
-    DocumentType.INSURANCE_CERTIFICATE: InsuranceCertificateDoc,
-    DocumentType.BILL_OF_EXCHANGE: BillOfExchangeDoc,
-    DocumentType.INSPECTION_CERTIFICATE: InspectionCertificateDoc,
-    DocumentType.UNKNOWN: UnclassifiedDoc,
-}
-"""Maps a classifier verdict onto the envelope that routes it."""
+    @property
+    def document_type(self) -> DocumentType:
+        """The family this document was routed to."""
+        return self.classification.document_type
 
 
 class ExtractedDocument(BaseModel):
@@ -189,6 +166,10 @@ class ExtractedDocument(BaseModel):
     confidence: float
     classification_reasoning: str
     filename: str | None = None
+
+    page_count: int | None = None
+    """How many pages were read, for a caller showing what it processed."""
+
     payload: ExtractionPayload | None = None
     """`None` when the document was unclassifiable or extraction failed."""
 

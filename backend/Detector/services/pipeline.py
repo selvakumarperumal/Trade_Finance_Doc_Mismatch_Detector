@@ -2,19 +2,27 @@
 
 Nothing above this module needs to know about Pydantic AI or Pydantic Graph:
 hand it a `CaseInput`, get back a `CaseResult`.
+
+There are two ways in, and the difference is OCR. `get_pipeline()` is the cheap
+process-wide one for presentations that already carry their text. `open()` is an
+async context manager that additionally holds a Textract client open, so documents
+can arrive as bytes; that is what the FastAPI lifespan uses.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 
+from Detector.core.config import Settings, get_settings
 from Detector.core.observability import Span, configure_observability, span
 from Detector.models.documents import CaseInput
 from Detector.models.reconciliation import CaseResult
 from Detector.services.deps import CaseState, DetectorDeps, StageEvent
 from Detector.services.graph import case_graph, render_mermaid
+from Detector.services.ocr import TextractOCR, textract_client
 
 type ProgressCallback = Callable[[StageEvent], Awaitable[None]]
 """Called once per audit event as the run produces it."""
@@ -22,14 +30,34 @@ type ProgressCallback = Callable[[StageEvent], Awaitable[None]]
 
 @dataclass(frozen=True, slots=True)
 class DetectorPipeline:
-    """Runs a presentation through classification, extraction and reconciliation."""
+    """Runs a presentation through OCR, classification, extraction and reconciliation."""
 
     deps: DetectorDeps
 
     @classmethod
-    def default(cls) -> DetectorPipeline:
-        """Build a pipeline on the process-wide settings, prompts and agents."""
-        return cls(deps=DetectorDeps.default())
+    def default(cls, settings: Settings | None = None) -> DetectorPipeline:
+        """Build a pipeline on the process-wide settings, prompts and agents, without OCR."""
+        return cls(deps=DetectorDeps.default(settings=settings))
+
+    @classmethod
+    @asynccontextmanager
+    async def open(cls, settings: Settings | None = None) -> AsyncIterator[DetectorPipeline]:
+        """A pipeline with OCR, for as long as the block runs.
+
+        The Textract client owns a connection pool, so it is opened once here and shared
+        by every case and every branch of every fan-out — not opened per document.
+
+        ```python
+        async with DetectorPipeline.open() as pipeline:
+            result = await pipeline.run(case)
+        ```
+        """
+        settings = settings or get_settings()
+        configure_observability(settings)
+        async with textract_client(settings) as client:
+            yield cls(
+                deps=DetectorDeps.default(TextractOCR.from_settings(client, settings), settings)
+            )
 
     async def run(self, case: CaseInput) -> CaseResult:
         """Analyse one presentation and return the finished report."""
@@ -49,7 +77,7 @@ class DetectorPipeline:
     async def run_with_progress(self, case: CaseInput, on_event: ProgressCallback) -> CaseResult:
         """Analyse one presentation, delivering audit events as they happen.
 
-        Use this behind a websocket: `on_event` fires for each classification,
+        Use this behind a websocket: `on_event` fires for each read, classification,
         extraction and reconciliation as it completes, rather than only at the end.
 
         The events arrive in completion order, not document order, because the
@@ -82,6 +110,11 @@ class DetectorPipeline:
             _annotate(case_span, result)
             return result
 
+    @property
+    def ocr_available(self) -> bool:
+        """Whether this pipeline can read documents that arrive without text."""
+        return self.deps.textract is not None
+
     @staticmethod
     def diagram(title: str | None = None) -> str:
         """The pipeline as a Mermaid diagram."""
@@ -113,7 +146,11 @@ def _annotate(case_span: Span, result: CaseResult) -> None:
 
 @lru_cache(maxsize=1)
 def get_pipeline() -> DetectorPipeline:
-    """The process-wide pipeline. Safe to share across concurrent requests.
+    """The process-wide pipeline, for presentations that already carry their text.
+
+    Safe to share across concurrent requests. It has no Textract client, so a document
+    with no text fails on its own branch — use `DetectorPipeline.open()` when uploads
+    have to be read.
 
     Configures Logfire on first use as a fallback. Prefer calling
     `configure_observability()` yourself at startup, before anything else runs.

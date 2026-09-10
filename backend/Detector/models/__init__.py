@@ -6,10 +6,9 @@ from Detector.models.documents import (
     ExtractedDocument,
     RawDocument,
     RoutedDocument,
-    RoutedDocuments,
     TokenUsage,
 )
-from Detector.models.enums import CaseStatus, DocumentType, Severity
+from Detector.models.enums import CaseStatus, DocumentType, JobStatus, Severity
 from Detector.models.extractions import (
     EXTRACTION_PAYLOAD_TYPES,
     BillOfExchange,
@@ -22,13 +21,21 @@ from Detector.models.extractions import (
     LetterOfCredit,
     PackingList,
 )
-from Detector.models.reconciliation import CaseResult, FieldObservation, Mismatch, ReconciliationReport
+from Detector.models.jobs import CaseEvent, CaseRecord
+from Detector.models.reconciliation import (
+    CaseResult,
+    FieldObservation,
+    Mismatch,
+    ReconciliationReport,
+)
 
 __all__ = [
     'EXTRACTION_PAYLOAD_TYPES',
     'BillOfExchange',
     'BillOfLading',
+    'CaseEvent',
     'CaseInput',
+    'CaseRecord',
     'CaseResult',
     'CaseStatus',
     'CertificateOfOrigin',
@@ -40,13 +47,13 @@ __all__ = [
     'FieldObservation',
     'InspectionCertificate',
     'InsuranceCertificate',
+    'JobStatus',
     'LetterOfCredit',
     'Mismatch',
     'PackingList',
     'RawDocument',
     'ReconciliationReport',
     'RoutedDocument',
-    'RoutedDocuments',
     'Severity',
     'TokenUsage',
 ]

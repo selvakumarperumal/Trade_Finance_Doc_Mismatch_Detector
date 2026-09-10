@@ -36,3 +36,32 @@ class CaseStatus(StrEnum):
     CLEAN = 'clean'
     NEEDS_REVIEW = 'needs_review'
     BLOCKED = 'blocked'
+
+
+class JobStatus(StrEnum):
+    """Where a submitted case has got to.
+
+    Distinct from `CaseStatus`, which is the compliance verdict. A case can be
+    `succeeded` here and `blocked` there: the analysis ran to completion and its
+    answer was that the bank would refuse.
+    """
+
+    QUEUED = 'queued'
+    """Accepted, waiting for a slot."""
+
+    RUNNING = 'running'
+    """Documents are being read, classified and extracted."""
+
+    SUCCEEDED = 'succeeded'
+    """Finished; `result` holds the report."""
+
+    FAILED = 'failed'
+    """Stopped on an error the pipeline could not degrade around; `error` says why."""
+
+    CANCELLED = 'cancelled'
+    """Abandoned by the caller, or by the process shutting down."""
+
+    @property
+    def is_terminal(self) -> bool:
+        """Whether this case will not change state again."""
+        return self in {JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED}

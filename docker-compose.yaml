@@ -6,55 +6,16 @@ services:
     image: trade_finance_doc_mismatch_detector:dev
     container_name: backend
     environment:
-      - DB_URL=postgresql+asyncpg://detector:detector@postgres:5432/tfd_db
-      - REDIS_URL=redis://redis:6379
+      # The Google provider reads either name; this repo sets GEMINI_API_KEY in .envrc.
+      - GEMINI_API_KEY=${GEMINI_API_KEY:?set GEMINI_API_KEY in your environment}
+      # OCR. Leave unset to run text-only: the service starts either way and reports
+      # ocr_available:false on /health.
+      - AWS_REGION=${AWS_REGION:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
     ports:
       - "8000:8000"
     volumes:
       - ./backend:/app
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=* --reload
     restart: always
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-  postgres:
-    image: postgres:latest
-    container_name: postgres
-    ports:
-      - "5432:5432"
-    environment:
-      - POSTGRES_USER=detector
-      - POSTGRES_PASSWORD=detector
-      - POSTGRES_DB=tfd_db
-      - PGDATA=/var/lib/postgresql/data/pgdata
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    restart: always
-    healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U detector -d tfd_db" ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 5s
-  
-  redis:
-    image: redis:latest
-    container_name: redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redisdata:/data
-    restart: always
-    healthcheck:
-      test: [ "CMD-SHELL", "redis-cli ping" ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 5s
-
-volumes:
-  pgdata:
-  redisdata:
-      
