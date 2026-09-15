@@ -56,9 +56,8 @@ class StubTextract:
 
 @pytest.fixture
 def settings() -> Settings:
-    """Test settings: no telemetry, no real provider, small limits so they are reachable."""
+    """Test settings: no real provider, and small limits so the tests can reach them."""
     return Settings(
-        logfire_enabled=False,
         ocr_enabled=False,
         classifier_model='test',
         extraction_model='test',

@@ -6,30 +6,24 @@ case and collecting its result are two separate acts:
 
     POST   /v1/cases/uploads      the files              -> 202 CaseRecord
     POST   /v1/cases              already-extracted text -> 202 CaseRecord
-    WS     /v1/cases/{id}/stream  watch it happen
-    GET    /v1/cases/{id}         poll it instead
+    GET    /v1/cases/{id}         poll it
     DELETE /v1/cases/{id}         give up on it, and forget what it held
 
-Every one of them answers with the same `CaseRecord`, which carries the status, the
-audit trail and — once it is done — the report. The websocket sends the whole record on
-each change rather than a delta, so a client renders the latest one and is correct
-whether it connected before the first document was read or after the last.
+Every one of them answers with the same `CaseRecord`, which carries the status, the audit
+trail and — once it is done — the report.
 
-The upload route refuses what it cannot use *before* spending anything on it: the file
-count before reading a byte, the running total as it reads, and the format from the
-bytes rather than from what the browser claimed.
+Watching a case as it runs is the other half, and it lives in `api/events.py`: a
+Socket.IO client subscribes and gets that same `CaseRecord` pushed on every change.
 """
 
 from __future__ import annotations
 
-from contextlib import suppress
 from datetime import date
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, File, Form, Response, UploadFile, WebSocket, status
+from fastapi import APIRouter, File, Form, Response, UploadFile, status
 from pydantic import BaseModel, ConfigDict, Field
-from starlette.websockets import WebSocketDisconnect
 
 from Detector.api.dependencies import RunnerDep, SettingsDep
 from Detector.api.errors import ErrorResponse, UploadRejected
@@ -37,17 +31,17 @@ from Detector.core.config import Settings
 from Detector.models.documents import CaseInput, RawDocument
 from Detector.models.jobs import CaseRecord
 from Detector.services.ocr import SUPPORTED_MEDIA_TYPES, sniff_media_type
-from Detector.services.store import CaseNotFound
 
 router = APIRouter(prefix='/v1/cases', tags=['cases'])
 
 UPLOAD_CHUNK_BYTES = 1 << 20
-"""Read uploads a megabyte at a time, so the case-wide size limit can be enforced
-*while* the bytes arrive rather than after all of them are already in memory."""
+"""Read uploads a megabyte at a time, so the size limits can be enforced *while* the
+bytes arrive rather than after all of them are already in memory."""
 
 ERRORS: dict[int | str, dict[str, type[ErrorResponse]]] = {
     code: {'model': ErrorResponse} for code in (404, 409, 413, 415, 422, 503)
 }
+"""The ways these routes refuse, for the OpenAPI schema."""
 
 
 class DocumentInput(BaseModel):
@@ -124,21 +118,7 @@ async def submit_uploads(
     Nothing is written to disk or to a bucket — the bytes live in memory until the
     document has been read, then are dropped.
     """
-    _check_count(files, settings)
-
-    documents: list[RawDocument] = []
-    remaining = settings.max_case_bytes
-    for index, upload in enumerate(files, start=1):
-        content = await _read_upload(upload, index, settings, budget=remaining)
-        remaining -= len(content)
-        documents.append(
-            RawDocument(
-                document_id=f'doc-{index}',
-                filename=upload.filename,
-                content=content,
-            )
-        )
-
+    documents = await _read_uploads(files, settings)
     return await runner.submit(
         CaseInput(
             case_id=case_id or new_case_id(),
@@ -172,7 +152,7 @@ async def get_case(case_id: str, runner: RunnerDep) -> CaseRecord:
     `status` moves `queued` -> `running` -> `succeeded` or `failed`. On `succeeded`,
     `result` holds the report; on `failed`, `error_code` and `error` say why.
     """
-    return await runner.store.get(case_id)
+    return await runner.get(case_id)
 
 
 @router.delete(
@@ -188,39 +168,37 @@ async def delete_case(case_id: str, runner: RunnerDep) -> Response:
     details, amounts — so a caller that has collected its result can have it dropped now
     rather than waiting for the retention window.
     """
-    await runner.store.get(case_id)  # 404 rather than a silent success on an unknown id.
-    await runner.cancel(case_id)
-    await runner.store.forget(case_id)
+    await runner.discard(case_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.websocket('/{case_id}/stream')
-async def stream_case(case_id: str, websocket: WebSocket, runner: RunnerDep) -> None:
-    """Watch a submitted case run.
+# --- reading the uploads -----------------------------------------------------
 
-    Connect with the id the submission returned. Each message is a complete `CaseRecord`
-    — the same shape `GET /v1/cases/{case_id}` returns — sent on every change, so there
-    is no race between the POST returning and the socket opening, and a reconnect needs
-    no cursor. The stream ends when `status` is terminal.
 
-    Events arrive in completion order rather than document order, because the documents
-    are read, classified and extracted in parallel. Key your UI on `document_id`.
+async def _read_uploads(files: list[UploadFile], settings: Settings) -> list[RawDocument]:
+    """Read every uploaded file into memory, refusing what cannot be used.
+
+    Each check runs at the first moment it becomes knowable: the file count before a byte
+    is read, the size while the bytes arrive, and the format from the bytes themselves.
+    `remaining` is what is left of the case-wide budget, so each file is measured against
+    what is actually available rather than against the per-file limit alone.
     """
-    await websocket.accept()
-    try:
-        async for record in runner.store.watch(case_id):
-            await websocket.send_text(record.model_dump_json())
-    except CaseNotFound as exc:
-        await websocket.send_json({'code': 'case_not_found', 'detail': str(exc)})
-    except WebSocketDisconnect:
-        return  # The client went away; nothing to report to.
-    finally:
-        # The client may already have gone, which closing again would complain about.
-        with suppress(RuntimeError):
-            await websocket.close()
+    _check_count(files, settings)
 
-
-# --- upload validation -------------------------------------------------------
+    documents: list[RawDocument] = []
+    remaining = settings.max_case_bytes
+    for index, upload in enumerate(files, start=1):
+        limit = min(settings.max_document_bytes, remaining)
+        content = await _read_upload(upload, settings, limit=limit)
+        remaining -= len(content)
+        documents.append(
+            RawDocument(
+                document_id=f'doc-{index}',
+                filename=upload.filename,
+                content=content,
+            )
+        )
+    return documents
 
 
 def _check_count(files: list[UploadFile], settings: Settings) -> None:
@@ -230,40 +208,31 @@ def _check_count(files: list[UploadFile], settings: Settings) -> None:
     file has already been read into memory first.
     """
     if not files:
-        raise UploadRejected(
-            'no files were uploaded',
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            code='invalid_case',
-        )
+        raise UploadRejected('no files were uploaded')
     if len(files) > settings.max_documents_per_case:
         raise UploadRejected(
             f'{len(files)} files were uploaded, above the limit of '
-            f'{settings.max_documents_per_case} documents per case',
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            code='invalid_case',
+            f'{settings.max_documents_per_case} documents per case'
         )
 
 
-async def _read_upload(
-    upload: UploadFile, index: int, settings: Settings, *, budget: int
-) -> bytes:
+async def _read_upload(upload: UploadFile, settings: Settings, *, limit: int) -> bytes:
     """Read one upload into memory, stopping as soon as it is clear it cannot be used.
 
-    Three ways to be refused, in the order they become knowable: past the per-file limit,
-    past what is left of the case's budget, or not a format Textract reads. The format
-    check comes last because it needs the first bytes, but it still happens before
-    anything is sent to AWS.
+    Three ways to be refused, in the order they become knowable: past `limit` bytes,
+    empty, or not a format Textract reads. The format check comes last because it needs
+    the leading bytes — but it still happens before anything is sent to AWS, and it reads
+    those bytes rather than trusting the content type the browser claimed.
     """
-    label = upload.filename or f'file {index}'
-    ceiling = min(settings.max_document_bytes, max(budget, 0))
+    name = upload.filename or 'an unnamed file'
 
     chunks: list[bytes] = []
     size = 0
     while chunk := await upload.read(UPLOAD_CHUNK_BYTES):
         size += len(chunk)
-        if size > ceiling:
+        if size > limit:
             raise UploadRejected(
-                f'{label} is larger than the {ceiling} bytes still available for this case '
+                f'{name} is larger than the {limit} bytes still available for this case '
                 f'(per-file limit {settings.max_document_bytes}, '
                 f'per-case limit {settings.max_case_bytes})',
                 status_code=status.HTTP_413_CONTENT_TOO_LARGE,
@@ -273,14 +242,10 @@ async def _read_upload(
 
     content = b''.join(chunks)
     if not content:
-        raise UploadRejected(
-            f'{label} is empty',
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            code='invalid_case',
-        )
+        raise UploadRejected(f'{name} is empty')
     if sniff_media_type(content) is None:
         raise UploadRejected(
-            f'{label} is not a document this service can read; accepted types are '
+            f'{name} is not a document this service can read; accepted types are '
             f'{", ".join(sorted(SUPPORTED_MEDIA_TYPES))}, and the bytes match none of them '
             f'(the browser called it {upload.content_type or "nothing in particular"})',
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,

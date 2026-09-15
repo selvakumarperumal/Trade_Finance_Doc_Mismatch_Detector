@@ -1,24 +1,26 @@
-"""The FastAPI application.
+"""The FastAPI application: what it builds at startup, and how it lets go at shutdown.
 
-Startup does four things, in an order that matters: configure Logfire so the rest of
-startup is traced, load the prompts so a typo in `Config/prompts.yaml` fails here rather
-than on the first request, open the Textract client the OCR step shares for the life of
-the process, and build the runner that owns in-flight cases.
+Startup does three things, in an order that matters:
+
+1. load the prompts, so a typo in `Config/prompts.yaml` fails here rather than on the
+   first request;
+2. open the Textract client the OCR step shares for the life of the process;
+3. build the runner that owns in-flight cases.
 
 OCR is the one part allowed to fail. A deployment that only ever receives extracted text
 has no reason to hold AWS credentials, so a client that cannot be opened leaves the
 service running with `ocr_available: false` instead of refusing to start.
 
-Shutdown is not symmetric with startup, and deliberately so. Cases run on background
-tasks that outlive the request that submitted them, so the runner is given a grace
-period to finish what it is holding before anything is torn down — and whatever is still
-running when that expires is cancelled and *recorded* as cancelled, so a caller polling
-across a deploy is told what happened rather than left watching a case that will never
-change.
+Shutdown is deliberately not the mirror image. Cases run on background tasks that outlive
+the request that submitted them, so the runner gets a grace period to finish what it is
+holding — and whatever is still running when that expires is cancelled and *recorded* as
+cancelled, so a caller polling across a deploy is told what happened rather than left
+watching a case that will never change.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 
@@ -27,13 +29,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from Detector.api.errors import register_error_handlers
+from Detector.api.events import MOUNT_PATH, build_socket_app
 from Detector.api.routes import cases_router, system_router
 from Detector.core.config import Settings, get_settings
-from Detector.core.observability import configure_observability, span
 from Detector.prompts.registry import get_prompts
 from Detector.services.pipeline import DetectorPipeline
 from Detector.services.runner import CaseRunner
-from Detector.services.store import CaseStore
+
+VERSION = '0.1.0'
+
+logger = logging.getLogger(__name__)
 
 DESCRIPTION = """
 Cross-checks the documents presented under a letter of credit — the credit itself, the
@@ -45,9 +50,10 @@ examiner would raise under UCP 600, with a verdict of `clean`, `needs_review` or
 answers `202` with a case id and the run continues in the background.
 
 1. `POST /v1/cases/uploads` with the files, or `POST /v1/cases` with extracted text.
-2. Open `WS /v1/cases/{case_id}/stream` to watch each document be read, classified and
-   extracted — it replays whatever already happened, so connecting late loses nothing.
-   Or poll `GET /v1/cases/{case_id}` until `status` is `succeeded`.
+2. Connect a **Socket.IO** client to `/socket.io` and emit `subscribe` with that case id
+   to watch each document be read, classified and extracted — it replays whatever
+   already happened, so subscribing late loses nothing. Or poll
+   `GET /v1/cases/{case_id}` until `status` is `succeeded`.
 3. `DELETE /v1/cases/{case_id}` when you are done with it, to drop what it held.
 """
 
@@ -59,8 +65,8 @@ async def _open_pipeline(stack: AsyncExitStack, settings: Settings) -> DetectorP
     try:
         return await stack.enter_async_context(DetectorPipeline.open(settings))
     except (BotoCoreError, ClientError) as exc:
-        with span('textract unavailable, continuing without OCR: {reason}', reason=str(exc)):
-            return DetectorPipeline.default(settings)
+        logger.warning('Textract unavailable, continuing without OCR: %s', exc)
+        return DetectorPipeline.default(settings)
 
 
 @asynccontextmanager
@@ -71,14 +77,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     an explicit `Settings` really does start up under that configuration.
     """
     settings: Settings = getattr(app.state, 'settings', None) or get_settings()
-    configure_observability(settings)
     get_prompts()
 
     async with AsyncExitStack() as stack:
         pipeline = await _open_pipeline(stack, settings)
-        runner = CaseRunner.build(pipeline, CaseStore(settings), settings)
-        # Registered before the yield so it runs before the Textract client closes:
-        # a case still being read needs the client alive to finish or to fail cleanly.
+        runner = CaseRunner.build(pipeline, settings=settings)
+        # The stack unwinds in reverse, so registering this last means the runner closes
+        # first: a case still being read keeps a live Textract client to finish or fail
+        # with, rather than losing it mid-document.
         stack.push_async_callback(runner.aclose)
 
         app.state.runner = runner
@@ -92,7 +98,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(
         title='Trade Finance Document Mismatch Detector',
         description=DESCRIPTION,
-        version=settings.logfire_service_version or '0.1.0',
+        version=VERSION,
         lifespan=lifespan,
     )
     app.state.settings = settings
@@ -112,4 +118,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_error_handlers(app)
     app.include_router(system_router)
     app.include_router(cases_router)
+
+    # Socket.IO is its own ASGI app rather than a route, so it is mounted rather than
+    # included — and it does its own origin check, because the CORS middleware above
+    # never sees requests that land inside a mount.
+    app.mount(MOUNT_PATH, build_socket_app(app, settings.cors_origins))
     return app

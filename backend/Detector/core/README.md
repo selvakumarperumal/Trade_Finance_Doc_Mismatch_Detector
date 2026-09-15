@@ -1,7 +1,7 @@
-# `core/` — configuration and observability
+# `core/` — configuration
 
-The two things every other layer needs and neither of them owns: what this deployment is
-configured to do, and where its traces go.
+The one thing every other layer needs and none of them owns: what this deployment is
+configured to do.
 
 Nothing in `core/` imports from `models`, `prompts`, `services` or `api`. It is the
 bottom of the dependency graph.
@@ -9,21 +9,30 @@ bottom of the dependency graph.
 ```mermaid
 flowchart TD
     ENV["Environment<br/>DETECTOR_* variables, .env"] --> S
-    S["config.Settings<br/>one frozen view of this deployment"] --> M[models]
+    S["config.Settings<br/>one view of this deployment"] --> M[models]
     S --> P[prompts]
     S --> SV[services]
     S --> A[api]
-    O["observability<br/>Logfire wiring + span helper"] --> SV
-    O --> A
-    S -.->|"logfire_ settings"| O
 ```
+
+One file, one class, one function:
+
+| | |
+|---|---|
+| `Settings` | every tunable, overridable from the environment |
+| `get_settings()` | the process-wide instance, read from the environment once |
+
+There is no telemetry layer. The service uses the standard library's `logging` for the
+two things worth saying out loud — Textract being unavailable at startup, and a case task
+failing unexpectedly — and nothing else. Anything that wants traces can wrap the ASGI app
+from outside.
 
 ---
 
 ## `config.py` — every tunable in one place
 
 `Settings` is a `pydantic-settings` model, so every field is overridable from the
-environment with a `DETECTOR_` prefix and `.env` is read automatically:
+environment with a `DETECTOR_` prefix, and `.env` is read automatically:
 
 ```python
 class Settings(BaseSettings):
@@ -43,6 +52,21 @@ DETECTOR_MAX_CONCURRENT_CASES=8
 DETECTOR_OCR_ENABLED=false
 ```
 
+Credentials are deliberately **not** settings. The Google provider reads `GEMINI_API_KEY`
+or `GOOGLE_API_KEY`, and boto3 resolves AWS credentials the usual way — so nothing
+secret ever lands in a `Settings` repr or a log line.
+
+The fields are grouped by what they govern, and the groups read top to bottom in the
+order a case meets them:
+
+1. **models** — one per stage, and how hard each one thinks
+2. **agent runs** — prompts, retries, and the budget for a single run
+3. **what one case may not exceed** — documents, characters, bytes, pages
+4. **how much runs at once** — the four ceilings, each on a different resource
+5. **OCR** — the Textract client
+6. **holding a finished case** — how long a result stays collectable
+7. **api** — CORS
+
 ### The models, and why the stages differ
 
 ```python
@@ -50,33 +74,34 @@ FAST_MODEL = 'google:gemini-3.7-flash'
 """Classification and extraction are mechanical: locate the field, copy the value out."""
 
 REASONING_MODEL = 'google:gemini-3.1-pro-preview'
-"""Reconciliation is the compliance judgement — the one stage worth the stronger model.
+"""Reconciliation is the compliance judgement — the one stage worth the stronger model."""
+```
 
 Deciding whether a bank would refuse a presentation is where the reasoning goes; the
 stages before it are looking things up. Splitting the two is most of the reason a
-twenty-document case is affordable."""
-```
-
-Effort and token budget rise the same way, for the same reason:
+twenty-document case is affordable — and effort and token budget rise the same way, for
+the same reason:
 
 ```python
     classifier_model: str = FAST_MODEL
     extraction_model: str = FAST_MODEL
     reconciliation_model: str = REASONING_MODEL
 
+    # Reasoning effort rises the same way, and so does room to write.
     classifier_thinking: ThinkingLevel = 'low'
-    """Classification is pattern matching; it does not need deep reasoning."""
-
     extraction_thinking: ThinkingLevel = 'medium'
-    """Extraction has to cope with messy OCR text and unlabelled fields."""
-
     reconciliation_thinking: ThinkingLevel = 'high'
-    """The compliance judgement is the part worth spending reasoning on."""
 
     classifier_max_tokens: int = 2_048
     extraction_max_tokens: int = 16_000
     reconciliation_max_tokens: int = 32_000
 ```
+
+| Stage | Why that level |
+|---|---|
+| `classifier` | pattern matching — "is this a bill of lading?" needs no deep reasoning |
+| `extraction` | has to cope with messy OCR text and unlabelled fields |
+| `reconciliation` | the compliance judgement, and the part worth spending reasoning on |
 
 `ThinkingLevel` is Pydantic AI's **provider-neutral** reasoning control — `'low'`,
 `'medium'`, `'high'` translate to whatever the provider takes — so pointing one stage at
@@ -112,23 +137,19 @@ flowchart LR
 
 ### Why there are so many ceilings
 
-They bound different resources and none substitutes for another. The docstrings say what
-each one is for — this pair is the one people conflate:
+They bound different resources and none substitutes for another. That is the whole
+comment above the group:
 
 ```python
-    max_concurrent_cases: int = 4
-    """Cases the process will analyse at once.
+    # --- how much runs at once ------------------------------------------------
+    # Each bounds a different resource and none substitutes for another: requests to the
+    # provider, calls to Textract, analyses in flight, submissions waiting for a slot.
 
-    A submission returns immediately with a case id and the run continues in the
-    background, so without a ceiling a burst of submissions would all start at once and
-    contend for the same provider rate limit. The model-call limiter bounds requests;
-    this bounds runs, which is what keeps memory (uploaded bytes, per-case state) flat."""
-
-    max_queued_cases: int = 64
-    """Submissions that may wait for a slot before new ones are refused with 503.
-
-    Queueing without limit turns an overload into an unbounded backlog where every
-    caller waits and none of them are told. This is the point where the service says no."""
+    max_parallel_model_calls: int | None = 6  # provider requests in flight; `None` for no limit
+    max_queued_model_calls: int | None = None  # calls that may wait for one of those slots
+    max_parallel_ocr_calls: int = 4  # Textract is rate limited per account and region
+    max_concurrent_cases: int = 4  # analyses at once; bounds memory, where the above bound requests
+    max_queued_cases: int = 64  # submissions waiting before new ones are refused with a 503
 ```
 
 | Setting | Bounds | Without it |
@@ -138,21 +159,29 @@ each one is for — this pair is the one people conflate:
 | `max_concurrent_cases` | analyses running at once | uploaded bytes and per-case state pile up in memory |
 | `max_queued_cases` | submissions waiting | an overload becomes a silent unbounded backlog |
 | `max_case_bytes` | one submission's total size | 25 files just under the per-file limit is a quarter of a gigabyte |
+| `max_retained_cases` | finished cases held | a duration alone bounds nothing under load |
 
-The one that is not about resources:
+The pair people conflate is `max_parallel_model_calls` and `max_concurrent_cases`. The
+first bounds **requests**; the second bounds **runs**, and a run holds uploaded bytes and
+per-document state whether or not it is currently waiting on the model. Bounding runs is
+what keeps memory flat.
+
+The one limit that is not about resources at all:
 
 ```python
     min_classification_confidence: float = 0.5
-    """Below this the document is treated as unclassified rather than sent to an
-    extractor that would read it under the wrong schema."""
+    """Below this a document is left unclassified rather than read under the wrong schema."""
 ```
+
+Reading a document under the wrong schema invents fields, and an invented field becomes a
+discrepancy that does not exist.
 
 ### Reading the settings
 
 ```python
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """The process-wide settings singleton."""
+    """The process-wide settings, read from the environment once."""
     return Settings()
 ```
 
@@ -160,105 +189,3 @@ Cached, so the environment is read once. The API also lets you build an app with
 explicit `Settings` — which is what the tests do, and why `api/dependencies.py` reads
 settings off `app.state` rather than calling `get_settings()` directly.
 
----
-
-## `observability.py` — Logfire, and the span helper
-
-Three layers emit spans and only the third needs code here.
-
-```mermaid
-flowchart TD
-    A["1. Pydantic Graph<br/>run graph trade_finance_doc_mismatch<br/>+ one child span per node"]
-    B["2. Pydantic AI<br/>model requests, tokens, tool calls"]
-    C["3. This module<br/>the case-level span"]
-    C --> A
-    A --> B
-    C -.->|"attributes: status, findings,<br/>tokens, duration"| Q["Searchable in Logfire:<br/>'every blocked case last week'"]
-```
-
-Layers 1 and 2 come free — `GraphBuilder(auto_instrument=True)` is the default, and
-Pydantic AI instruments itself once asked:
-
-```python
-    logfire.configure(
-        service_name=settings.logfire_service_name,
-        service_version=settings.logfire_service_version,
-        environment=settings.logfire_environment,
-        send_to_logfire=settings.logfire_send_to_logfire,
-        console=logfire.ConsoleOptions() if settings.logfire_console else False,
-    )
-    logfire.instrument_pydantic_ai(
-        include_content=settings.logfire_include_content,
-        include_binary_content=False,
-    )
-```
-
-### The no-op span
-
-`span()` hands back a no-op when Logfire is switched off, so calling code never has to
-check whether telemetry is configured:
-
-```python
-@contextmanager
-def span(name: str, /, **attributes: Any) -> Generator[Span]:
-    """Open a span, or hand back a no-op if Logfire is off.
-
-    `name` is a Logfire message template, so `'analyse case {case_id}'` with
-    `case_id=...` groups every case under one span name while still showing the
-    individual id on each trace.
-    """
-    if not _configured:
-        yield _NoopSpan()
-        return
-    with logfire.span(name, **attributes) as logfire_span:
-        yield logfire_span
-```
-
-```python
-class _NoopSpan:
-    """Stands in for a span when Logfire is switched off.
-
-    Cheaper than a disabled real span, and it keeps `logfire.span()` from
-    warning that Logfire was never configured.
-    """
-
-    def set_attribute(self, key: str, value: Any) -> None:
-        return None
-
-    def set_attributes(self, attributes: Mapping[str, Any]) -> None:
-        return None
-```
-
-### What the case span carries
-
-`services/pipeline.py` puts the verdict on the span, which is what makes a trace
-searchable by business outcome rather than only by latency:
-
-```python
-    case_span.set_attributes(
-        {
-            'case.status': result.status.value,
-            'case.critical_findings': result.report.critical_count,
-            'case.warning_findings': result.report.warning_count,
-            'case.documents_extracted': sum(1 for d in result.documents if d.is_usable),
-            'case.documents_failed': sum(1 for d in result.documents if not d.is_usable),
-            'case.duration_seconds': result.duration_seconds,
-            'case.model_requests': result.usage.requests,
-            'case.input_tokens': result.usage.input_tokens,
-            'case.output_tokens': result.usage.output_tokens,
-            'case.cache_read_tokens': result.usage.cache_read_tokens,
-        }
-    )
-```
-
-### One setting worth reading before you change it
-
-```python
-    logfire_include_content: bool = False
-    """Whether prompts and completions are attached to spans.
-
-    Off by default on purpose: the prompts here contain the full text of letters
-    of credit and invoices, which means counterparty names, bank details and
-    amounts. Turn it on deliberately, and only where the telemetry backend is
-    inside the same trust boundary as the documents."""
-```

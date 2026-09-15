@@ -91,13 +91,13 @@ stateDiagram-v2
 builder.add(
     builder.edge_from(builder.start_node).to(ingest),
     builder.edge_from(ingest)
-    .label("per document")
+    .label('per document')
     .map(fork_id=FAN_OUT_ID, downstream_join_id=COLLECT_ID)
     .to(ocr),
     builder.edge_from(ocr).to(classify),
     builder.edge_from(classify).to(_routing_decision()),
     builder.edge_from(*EXTRACTION_STEPS.values(), skip_unclassified).to(collect),
-    builder.edge_from(collect).label("all documents").to(reconcile),
+    builder.edge_from(collect).label('all documents').to(reconcile),
     builder.edge_from(reconcile).to(builder.end_node),
 )
 
@@ -124,28 +124,28 @@ document, plus one reconciliation.
 
 ```python
 @builder.step
-async def ingest(
-    ctx: StepContext[CaseState, DetectorDeps, CaseInput],
-) -> list[RawDocument]:
+async def ingest(ctx: StepContext[CaseState, DetectorDeps, CaseInput]) -> list[RawDocument]:
     """Validate the presentation and hand its documents to the fan-out.
 
-    Oversized or oversubscribed cases fail here rather than being silently
-    truncated, because a truncated document produces a confident wrong answer.
+    The only step allowed to fail the whole case, because everything it checks is a
+    property of the submission rather than of one document. Oversized cases fail here
+    rather than being silently truncated: a truncated document produces a confident
+    wrong answer.
     """
     case = ctx.inputs
     settings = ctx.deps.settings
 
     if len(case.documents) > settings.max_documents_per_case:
         raise ValueError(
-            f"case {case.case_id} has {len(case.documents)} documents, "
-            f"above the limit of {settings.max_documents_per_case}"
+            f'case {case.case_id} has {len(case.documents)} documents, '
+            f'above the limit of {settings.max_documents_per_case}'
         )
 
     for document in case.documents:
         if len(document.text) > settings.max_document_chars:
             raise ValueError(
-                f"document {document.document_id} has {len(document.text)} characters, "
-                f"above the limit of {settings.max_document_chars}; split it before submitting"
+                f'document {document.document_id} has {len(document.text)} characters, '
+                f'above the limit of {settings.max_document_chars}; split it before submitting'
             )
 ```
 
@@ -161,13 +161,11 @@ async def ingest(
         # errors, and every one of them means the same thing here: this document could
         # not be read. Letting any of them escape would fail a whole presentation over
         # one bad scan.
-        return _unread(ctx, raw, f"could not be read: {exc}")
+        return _unread(ctx, raw, f'could not be read: {exc}')
 
     if read.is_empty:
         return _unread(
-            ctx,
-            raw,
-            f"no text found in {read.page_count} page(s); the scan may be blank or illegible",
+            ctx, raw, f'no text found in {read.page_count} page(s); the scan may be blank'
         )
 ```
 
@@ -224,26 +222,24 @@ def _is_type(document_type: DocumentType) -> Callable[[RoutedDocument], bool]:
 ```
 
 So a new family needs one entry in that table and one prompt; its step, its route and its
-instrumentation span all appear on their own.
+route all appear on their own.
 
 ### `reconcile` — and the failure that must not lose the work
 
 ```python
         try:
             result = await ctx.deps.agents.reconciler.run(
-                _reconciliation_prompt(state, usable),
-                usage_limits=ctx.deps.usage_limits,
+                _reconciliation_prompt(state, usable), usage_limits=ctx.deps.usage_limits
             )
         except (UsageLimitExceeded, RunCancelled):
-            # Case-level: the budget is spent, or the whole run is going away.
-            raise
+            raise  # Case-level: the budget is spent, or the whole run is going away.
         except Exception as exc:  # noqa: BLE001 - the extractions are still worth returning
             # Every document has already been read, classified and extracted by this
             # point. Letting the failure escape would throw all of that away and hand
             # the caller nothing, so the extracted fields go back with a report saying
             # the cross-checks did not run — which a human examiner can act on.
             report = _unreconciled_report(documents, exc)
-            state.record("reconcile", f"reconciliation failed: {exc}")
+            state.record('reconcile', f'reconciliation failed: {exc}')
 ```
 
 ### Degrading instead of failing
@@ -285,19 +281,20 @@ presentation containing an unreadable scan can never come back `clean`:
 
 ```python
     unreadable = [document for document in documents if not document.is_usable]
+
     if unreadable:
         mismatches.append(
             Mismatch(
-                code="document_not_extracted",
+                code='document_not_extracted',
                 severity=Severity.WARNING,
-                field="document set",
+                field='document set',
                 explanation=(
-                    f"{len(unreadable)} presented document(s) could not be read into structured "
-                    "fields and took no part in the cross-checks: "
-                    + ", ".join(f"{d.document_id} ({d.error})" for d in unreadable)
+                    f'{len(unreadable)} presented document(s) could not be read into '
+                    'structured fields and took no part in the cross-checks: '
+                    + ', '.join(f'{d.document_id} ({d.error})' for d in unreadable)
                 ),
                 documents_involved=[DocumentType.UNKNOWN],
-                suggested_action="Re-upload a clearer copy, or examine these documents manually.",
+                suggested_action='Re-upload a clearer copy, or examine these documents manually.',
             )
         )
 ```
@@ -334,7 +331,8 @@ and output type:
     }
 ```
 
-`name=` becomes the span name in Logfire, which is why each extractor gets its own.
+`name=` is what identifies the agent in an error or a trace, which is why each
+extractor gets its own.
 
 ### One limiter, shared by all ten
 
@@ -414,10 +412,9 @@ Every tool returns a `detail` line stating the computed numbers, and the reconci
 prompt tells the agent to quote it:
 
 ```python
-    parts.append(
-        "\nUse the deterministic tools for every date and amount comparison rather than "
-        "computing them yourself, and quote the figures they return in your findings.\n"
-    )
+            '\nUse the deterministic tools for every date and amount comparison rather '
+            'than computing them yourself, and quote the figures they return in your '
+            'findings.\n',
 ```
 
 | Tool | Question | Rule |
@@ -599,6 +596,21 @@ The streaming variant is what the runner calls:
 
 ## `runner.py` and `store.py` — turning a long job into a fast response
 
+**The store is a dictionary**: `{case_id: CaseRecord}`. Everything else about it follows
+from one awkward fact — `POST /v1/cases` answers in milliseconds but the analysis takes
+minutes, so the answer is ready long after the request that asked for it has gone. It has
+to wait somewhere, and that somewhere is the store. Three jobs, and that is the file:
+
+| | |
+|---|---|
+| hold the record | one `CaseRecord` per submission, replaced as the run progresses |
+| wake the watchers | a Socket.IO subscriber asks to be told when its case changes |
+| forget old cases | a record holds a presentation's extracted contents, so it is dropped after an hour, or when 500 pile up |
+
+**The runner is the only object the API talks to.** It owns the store and keeps it to
+itself: routes call `submit`, `get`, `watch` and `discard`, and nothing in `api/`
+mentions a store at all.
+
 ```mermaid
 sequenceDiagram
     participant API
@@ -680,7 +692,10 @@ whichever way the failure arrived.
 
         Each yield is the whole state, not a delta, so a client renders the latest one
         and is correct whenever it connected. Iteration ends at a terminal state, which
-        lets a websocket simply run the loop to completion and close.
+        lets a subscriber simply run the loop to completion and stop.
+
+        The record is yielded *outside* the lock, so a slow client cannot hold up the run
+        that is writing to the store.
         """
         while True:
             async with self._lock:
@@ -702,12 +717,16 @@ the read and the wait sets the very event this loop is about to wait on.
     def _publish(self, live: _LiveCase, **fields: object) -> None:
         """Replace the record with an updated copy and wake everyone watching.
 
-        Records are replaced rather than mutated so that one already handed to a watcher
+        Records are replaced rather than mutated, so one already handed to a watcher
         stays exactly what that watcher was shown.
         """
         live.record = live.record.model_copy(update=fields)
-        waiters, live.changed = live.changed, asyncio.Event()
-        waiters.set()
+
+        # Hand the watchers waiting right now a set event, and leave a fresh one behind
+        # for the next change. Replacing rather than clearing is what makes this reach
+        # every watcher instead of only the first one to wake.
+        woken, live.changed = live.changed, asyncio.Event()
+        woken.set()
 ```
 
 The event is **replaced, never cleared**. With a single shared event, whichever watcher
@@ -719,18 +738,23 @@ woke first would clear it and the rest would sleep through the update.
     def _evict(self) -> None:
         """Drop expired cases, then the oldest finished ones if too many remain.
 
-        Called from `create` rather than a background sweeper: eviction only matters when
-        the store is being used, and a sweeper is one more task to own and cancel.
+        Called from `create` rather than by a background sweeper: eviction only matters
+        when the store is being used, and a sweeper is one more task to own and cancel.
         """
-        cutoff = datetime.now(UTC) - self._retention
+        expired_before = datetime.now(UTC) - self._retention
+        over_ceiling = len(self._cases) - self._max_retained
+
+        # Oldest first, so the ones past the ceiling are the first `over_ceiling` of them.
         finished = sorted(
             (live.record.finished_at, case_id)
             for case_id, live in self._cases.items()
             if live.record.finished_at is not None
         )
-        overflow = len(self._cases) - self._max_retained
+
         for position, (finished_at, case_id) in enumerate(finished):
-            if finished_at < cutoff or position < overflow:
+            too_old = finished_at < expired_before
+            too_many = position < over_ceiling
+            if too_old or too_many:
                 del self._cases[case_id]
 ```
 

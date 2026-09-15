@@ -64,7 +64,7 @@ def load_prompts(path: Path) -> dict[str, str]:
     if not isinstance(prompts, dict):
         # ValueError, not TypeError: the file's *contents* are wrong, which is a
         # configuration problem, not a caller passing the wrong kind of argument.
-        raise ValueError(f"{path} must contain a 'system_prompts' mapping")
+        raise ValueError(f"{path} must contain a 'system_prompts' mapping")  # noqa: TRY004
 
     unusable = sorted(
         name

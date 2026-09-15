@@ -1,6 +1,9 @@
-"""Cross-cutting configuration and observability."""
+"""Cross-cutting configuration.
+
+`Settings` is every tunable this deployment has, and `get_settings()` is the
+process-wide instance read from the environment once.
+"""
 
 from Detector.core.config import Settings, get_settings
-from Detector.core.observability import configure_observability, is_configured, span
 
-__all__ = ['Settings', 'configure_observability', 'get_settings', 'is_configured', 'span']
+__all__ = ['Settings', 'get_settings']

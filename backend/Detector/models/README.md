@@ -4,9 +4,24 @@ Pure Pydantic and dataclasses. Nothing here imports Pydantic AI, Pydantic Graph 
 FastAPI, which is what lets the same types serve the agents, the graph and the HTTP
 responses without any of them leaking into the others.
 
-These are not passive data holders. The extraction payloads **are** the agents'
-`output_type`, so every field name and docstring in `extractions.py` is part of the
-prompt the model sees.
+These are not passive data holders. Several of them **are** an agent's `output_type`,
+and those set `use_attribute_docstrings=True`, which means every field name and docstring
+in them is part of the prompt the model sees. Editing one of those docstrings changes
+model behaviour, so they are the one place in the codebase where prose is code:
+
+| Model | Read by |
+|---|---|
+| everything in `extractions.py` | the eight extraction agents |
+| `Classification` | the classifier agent |
+| `ReconciliationReport`, `Mismatch`, `FieldObservation` | the reconciliation agent |
+| `CaseRecord` | nothing — but the docstrings become the OpenAPI field descriptions |
+
+Everywhere else the docstrings are for whoever reads the code next, and can be rewritten
+freely.
+
+Nothing is re-exported from `models/__init__.py`. Import from the module that defines
+what you need — `from Detector.models.documents import CaseInput` — so the name says
+where to look.
 
 ## The journey of one document
 
@@ -208,30 +223,15 @@ all iterate it. Adding a document family means adding one entry here and one pro
 
 ## `documents.py` — documents in flight
 
+Three shapes, one per stage, each carrying forward what the next one needs:
+
 ```python
 class RawDocument(BaseModel):
-    """One uploaded document on its way to the agents.
-
-    It arrives either with `text` already extracted, or with the file itself in
-    `content` for the OCR step to read with Textract. The bytes are never stored:
-    they are read once and dropped, so every step after OCR sees one shape whichever
-    way the document came in.
-    """
+    """One uploaded document on its way to the agents."""
 
     document_id: str
-    """Stable identifier assigned by the caller (upload id, row id, ...)."""
-
     text: str = ''
-    """Plain text of the document — the only evidence the agents get. Empty means the
-    document has not been read yet."""
-
     content: bytes | None = Field(default=None, repr=False, exclude=True)
-    """The file itself, for OCR. Dropped as soon as the OCR step has read it.
-
-    Excluded from serialisation: a presentation is megabytes of scanned paper, and
-    none of it belongs in an API response, a log line or a stored case record.
-    """
-
     filename: str | None = None
     page_count: int | None = None
     ocr_error: str | None = None
@@ -241,6 +241,17 @@ class RawDocument(BaseModel):
         """Whether this document still has to be read before a model can see it."""
         return not self.text.strip()
 ```
+
+Every field here earns its place, and it is worth saying where each one is spent:
+
+| Field | Who fills it | Who reads it |
+|---|---|---|
+| `document_id` | the API, `doc-1`, `doc-2`… unless the caller brings its own | every stage after — the audit trail keys on it, and so does each finding's observations |
+| `text` | the OCR step, or the caller on `POST /v1/cases` | the classifier and the extractor; it is the only evidence a model ever sees |
+| `content` | the upload route | the OCR step, then dropped |
+| `filename` | the uploader | shown back to the caller; never trusted to say what format the file is |
+| `page_count` | the OCR step | the caller — Textract bills per page, so this is what a case cost to read |
+| `ocr_error` | the OCR step | the reconciler, which turns an unread document into a finding |
 
 `exclude=True` on `content` is load-bearing: it is what stops megabytes of scanned paper
 appearing in an API response or a log line.
@@ -286,17 +297,18 @@ class RoutedDocument:
 ### Usage accounting
 
 `TokenUsage` is the flattened, storable form of Pydantic AI's live `RunUsage`, and it
-adds, so a document's cost accumulates down its whole branch:
+adds, so a document's cost accumulates down its whole branch. It carries exactly the four
+numbers the case result reports — `RunUsage` also tracks tool calls and cache writes,
+which nothing here reads, so they are not copied across:
 
 ```python
     def __add__(self, other: TokenUsage) -> TokenUsage:
+        """Add two snapshots, so a case can total what its branches each spent."""
         return TokenUsage(
             requests=self.requests + other.requests,
-            tool_calls=self.tool_calls + other.tool_calls,
             input_tokens=self.input_tokens + other.input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,
             cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
-            cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
         )
 ```
 
@@ -374,7 +386,7 @@ The counts the graph uses to derive the verdict:
 ## `jobs.py` — a submitted case as a record
 
 `CaseRecord` is the **only** shape the API hands back: the `202` body, the polling
-response, and every websocket message.
+response, and every Socket.IO `case` event.
 
 ```python
 class CaseRecord(BaseModel):
@@ -409,5 +421,5 @@ class CaseRecord(BaseModel):
         return self.status.is_terminal
 ```
 
-Because a record is a complete snapshot rather than a delta, a websocket client that
+Because a record is a complete snapshot rather than a delta, a subscriber that
 connects late or reconnects simply renders the newest one and is correct.

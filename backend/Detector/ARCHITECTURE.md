@@ -29,7 +29,7 @@ flowchart TD
         API --> ACC["202 CaseRecord<br/>status queued"]
     end
 
-    ACC -.->|"the browser now watches"| WS["WS /v1/cases/{id}/stream"]
+    ACC -.->|"the browser now watches"| WS["Socket.IO: subscribe {case_id}"]
     API --> RUN
 
     subgraph BG["services/ — background, minutes long"]
@@ -75,16 +75,16 @@ flowchart LR
     C4 -->|yes| OK["accepted"]
 ```
 
-The size check happens *while* the bytes arrive, not after:
+The size check happens *while* the bytes arrive, not after. `limit` is the smaller of
+the per-file limit and what is left of the whole case's budget, so a batch that is
+collectively too big is stopped part-way through rather than once all of it has landed:
 
 ```python
-    ceiling = min(settings.max_document_bytes, max(budget, 0))
-
     chunks: list[bytes] = []
     size = 0
     while chunk := await upload.read(UPLOAD_CHUNK_BYTES):
         size += len(chunk)
-        if size > ceiling:
+        if size > limit:
             raise UploadRejected(...)  # 413 upload_too_large
         chunks.append(chunk)
 ```
@@ -157,7 +157,7 @@ serialisation, so the bytes cannot reach a response or a log line:
 ```
 
 That same `CaseRecord` shape is what every other endpoint returns — the polling response
-and every websocket message. There is nothing else to learn.
+and every Socket.IO `case` event. There is nothing else to learn.
 
 If too many submissions are already waiting, the service answers `503` with a
 `Retry-After` instead. Refusing at the door beats handing back a case id nobody will look
@@ -171,13 +171,13 @@ at for twenty minutes.
 builder.add(
     builder.edge_from(builder.start_node).to(ingest),
     builder.edge_from(ingest)
-    .label("per document")
+    .label('per document')
     .map(fork_id=FAN_OUT_ID, downstream_join_id=COLLECT_ID)
     .to(ocr),
     builder.edge_from(ocr).to(classify),
     builder.edge_from(classify).to(_routing_decision()),
     builder.edge_from(*EXTRACTION_STEPS.values(), skip_unclassified).to(collect),
-    builder.edge_from(collect).label("all documents").to(reconcile),
+    builder.edge_from(collect).label('all documents').to(reconcile),
     builder.edge_from(reconcile).to(builder.end_node),
 )
 ```
@@ -306,13 +306,10 @@ flowchart TD
 ```
 
 ```python
-    parts.append(
-        "\nUse the deterministic tools for every date and amount comparison rather than "
-        "computing them yourself, and quote the figures they return in your findings.\n"
-    )
-    parts.append(
-        format_as_xml(evidence, root_tag="extracted_documents", item_tag="document")
-    )
+            '\nUse the deterministic tools for every date and amount comparison rather '
+            'than computing them yourself, and quote the figures they return in your '
+            'findings.\n',
+            format_as_xml(evidence, root_tag='extracted_documents', item_tag='document'),
 ```
 
 The tools are pure functions, so the same presentation always gets the same arithmetic:
@@ -346,12 +343,13 @@ read can never come back `clean`.
 
 ## 8. Collecting the result
 
-The record reaches `succeeded`, the websocket pushes the whole record and closes, and a
-poller sees the same thing on its next `GET`:
+The record reaches `succeeded`, the subscriber is pushed the whole record and then
+`done`, and a poller sees the same thing on its next `GET`:
 
 ```python
-        async for record in runner.store.watch(case_id):
-            await websocket.send_text(record.model_dump_json())
+        async for record in runner.watch(case_id):
+            await emit(CASE, record.model_dump(mode='json'))
+        await emit(DONE, {'case_id': case_id})
 ```
 
 ```json
@@ -368,7 +366,8 @@ poller sees the same thing on its next `GET`:
       ] } } }
 ```
 
-`DELETE /v1/cases/{id}` drops the record when the caller is done. Otherwise it expires on
+`DELETE /v1/cases/{id}` calls `runner.discard(id)`, which drops the record when the
+caller is done. Otherwise it expires on
 its own — it holds a whole presentation's extracted contents, so it should not outlive
 the caller's interest in it.
 
@@ -395,8 +394,7 @@ everything else:
 
 ```python
         except (UsageLimitExceeded, RunCancelled):
-            # Case-level: the budget is spent, or the whole run is going away.
-            raise
+            raise  # Case-level: the budget is spent, or the whole run is going away.
         except Exception as exc:  # noqa: BLE001 - the extractions are still worth returning
             # Every document has already been read, classified and extracted by this
             # point. Letting the failure escape would throw all of that away and hand
@@ -427,11 +425,11 @@ One vocabulary, whichever way the failure arrived.
 
 ```mermaid
 flowchart TD
-    A["api/ — routes, errors, app factory"] --> S["services/ — agents, graph, OCR, runner, store"]
+    A["api/ — routes, Socket.IO events,<br/>errors, app factory"] --> S["services/ — agents, graph,<br/>OCR, runner, store"]
     S --> P["prompts/ — load and validate prompts.yaml"]
     S --> M["models/ — the shapes everything moves through"]
     P --> M
-    M --> C["core/ — settings and observability"]
+    M --> C["core/ — settings"]
     S --> C
     A --> C
 ```
@@ -449,11 +447,11 @@ async with DetectorPipeline.open() as pipeline:
 
 | Folder | What it does |
 |---|---|
-| [`core/`](core/README.md) | Every tunable, and the Logfire wiring |
+| [`core/`](core/README.md) | Every tunable, in one `Settings` class |
 | [`models/`](models/README.md) | Documents, extractions, findings, job records |
 | [`prompts/`](prompts/README.md) | Loads and validates the ten system prompts |
 | [`services/`](services/README.md) | The engine: agents, the graph, OCR, the runner |
-| [`api/`](api/README.md) | The HTTP and websocket layer |
+| [`api/`](api/README.md) | The HTTP and Socket.IO layer |
 
 ---
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -16,11 +18,17 @@ def upload(client: TestClient, *files, **data):
 
 
 def drain(client: TestClient, case_id: str) -> dict:
-    """Follow a case to its end over the websocket, returning the final record."""
-    with client.websocket_connect(f'/v1/cases/{case_id}/stream') as ws:
-        while (record := ws.receive_json()).get('status') not in TERMINAL:
-            pass
-        return record
+    """Poll a case to its end, returning the final record.
+
+    The pushing half of the API is Socket.IO now, and it is covered in `test_events.py`;
+    these tests only need the case to finish.
+    """
+    for _ in range(500):
+        record = client.get(f'/v1/cases/{case_id}').json()
+        if record.get('status') in TERMINAL:
+            return record
+        time.sleep(0.01)
+    raise AssertionError(f'case {case_id} never reached a terminal status')
 
 
 # --- the flow a person clicking submit goes through --------------------------
@@ -56,24 +64,22 @@ def test_every_page_of_a_multipage_pdf_is_read(
     assert final['result']['documents'][0]['page_count'] == 4
 
 
-def test_polling_returns_the_same_record_the_socket_sends(client: TestClient) -> None:
+def test_a_finished_case_reports_its_result_and_its_trail(client: TestClient) -> None:
     case_id = upload(client, ('invoice.pdf', make_pdf(1), 'application/pdf')).json()['case_id']
-    streamed = drain(client, case_id)
-    polled = client.get(f'/v1/cases/{case_id}').json()
+    drain(client, case_id)
 
-    assert polled == streamed
+    polled = client.get(f'/v1/cases/{case_id}').json()
     assert polled['status'] == 'succeeded'
     assert polled['result'] is not None
     assert polled['events']
 
 
-def test_connecting_late_replays_the_whole_run(client: TestClient) -> None:
-    """The socket opens after the POST returns, so nothing may depend on the timing."""
+def test_a_case_keeps_its_trail_after_it_finishes(client: TestClient) -> None:
+    """Collection happens after the POST returns, so nothing may depend on the timing."""
     case_id = upload(client, ('invoice.pdf', make_pdf(2), 'application/pdf')).json()['case_id']
-    client.get(f'/v1/cases/{case_id}')  # let the run finish first
-
     final = drain(client, case_id)
-    assert final['events'], 'a finished case must still replay its trail'
+
+    assert final['events'], 'a finished case must still carry its trail'
     assert final['result'] is not None
 
 
@@ -155,14 +161,6 @@ def test_an_unknown_case_is_a_404(client: TestClient) -> None:
     response = client.get('/v1/cases/ghost')
     assert response.status_code == 404
     assert response.json()['code'] == 'case_not_found'
-
-
-def test_the_stream_reports_an_unknown_case_rather_than_hanging(client: TestClient) -> None:
-    with client.websocket_connect('/v1/cases/ghost/stream') as ws:
-        assert ws.receive_json() == {
-            'code': 'case_not_found',
-            'detail': "no case 'ghost'; it may have expired",
-        }
 
 
 def test_health_reports_whether_scans_can_be_read(client: TestClient) -> None:

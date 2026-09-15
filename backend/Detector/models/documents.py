@@ -1,4 +1,11 @@
-"""Documents as they travel through the pipeline: raw -> classified -> extracted."""
+"""Documents as they travel through the pipeline: raw -> classified -> extracted.
+
+Three shapes, one per stage, and each carries forward what the next one needs:
+
+    RawDocument       what was uploaded, plus its text once OCR has read it
+    RoutedDocument    the same document, now with the classifier's verdict
+    ExtractedDocument the finished branch: typed fields, or the reason there are none
+"""
 
 from __future__ import annotations
 
@@ -17,74 +24,72 @@ if TYPE_CHECKING:
 
 
 class TokenUsage(BaseModel):
-    """A serialisable snapshot of what a stage cost.
+    """What a stage cost, in the four numbers the case result reports.
 
-    `pydantic_ai.usage.RunUsage` is the live accumulator; this is the flattened
-    form that survives a trip through the database and back.
+    `pydantic_ai.usage.RunUsage` is the live accumulator; this is the flattened form that
+    survives a trip through JSON and back.
     """
 
     model_config = ConfigDict(frozen=True)
 
     requests: int = 0
-    tool_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
 
     @classmethod
     def from_run_usage(cls, usage: RunUsage) -> TokenUsage:
         """Flatten a Pydantic AI `RunUsage` into a stored snapshot."""
         return cls(
             requests=usage.requests,
-            tool_calls=usage.tool_calls,
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             cache_read_tokens=usage.cache_read_tokens,
-            cache_write_tokens=usage.cache_write_tokens,
         )
 
     def __add__(self, other: TokenUsage) -> TokenUsage:
+        """Add two snapshots, so a case can total what its branches each spent."""
         return TokenUsage(
             requests=self.requests + other.requests,
-            tool_calls=self.tool_calls + other.tool_calls,
             input_tokens=self.input_tokens + other.input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,
             cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
-            cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
         )
 
 
 class RawDocument(BaseModel):
     """One uploaded document on its way to the agents.
 
-    It arrives either with `text` already extracted, or with the file itself in
-    `content` for the OCR step to read with Textract. The bytes are never stored:
-    they are read once and dropped, so every step after OCR sees one shape whichever
-    way the document came in.
+    It arrives either with `text` already extracted, or with the file itself in `content`
+    for the OCR step to read. Every step after OCR sees the same shape whichever way the
+    document came in.
     """
 
     document_id: str
-    """Stable identifier assigned by the caller (upload id, row id, ...)."""
+    """What identifies this document everywhere downstream — in the audit trail, in the
+    per-document result, and in the observations a finding cites. `CaseInput` refuses a
+    presentation where two documents share one."""
 
     text: str = ''
-    """Plain text of the document — the only evidence the agents get. Empty means the
-    document has not been read yet."""
+    """The document's text, and the only evidence the agents ever get. Empty means it has
+    not been read yet."""
 
     content: bytes | None = Field(default=None, repr=False, exclude=True)
-    """The file itself, for OCR. Dropped as soon as the OCR step has read it.
-
-    Excluded from serialisation: a presentation is megabytes of scanned paper, and
-    none of it belongs in an API response, a log line or a stored case record.
-    """
+    """The file itself, for OCR. Dropped as soon as the OCR step has read it, and
+    `exclude=True` keeps megabytes of scanned paper out of every API response, log line
+    and stored case record."""
 
     filename: str | None = None
+    """What the uploader called it, shown back to the caller. Never trusted to say what
+    format the file is — that comes from the bytes."""
 
     page_count: int | None = None
-    """Pages the document turned out to have, filled in once it has been read."""
+    """Pages the document turned out to have, filled in by the OCR step. Textract bills
+    per page, so this is what a caller checks to see what a case actually cost."""
 
     ocr_error: str | None = None
-    """Why `text` is still empty after the OCR step, when it is."""
+    """Why `text` is still empty after the OCR step, when it is. A document that could
+    not be read becomes a finding rather than a failed case."""
 
     @property
     def needs_ocr(self) -> bool:
@@ -97,29 +102,24 @@ class CaseInput(BaseModel):
 
     case_id: str
     documents: list[RawDocument] = Field(default_factory=list)
+
     presented_on: date | None = None
-    """The date the documents were presented to the bank, when known. Required for
-    the UCP 600 Art 14(c) presentation-period check."""
+    """The date the documents reached the bank. UCP 600 Art 14(c) gives a beneficiary a
+    limited window to present after shipment, so without this date that one check is
+    skipped rather than guessed at. Every other check runs either way."""
 
     @model_validator(mode='after')
     def _document_ids_are_unique(self) -> CaseInput:
         """Reject a case that presents two documents under the same id.
 
-        Every later stage keys on `document_id`: the audit trail, the per-document
-        result, and the observations the reconciler cites in a finding. Two documents
-        sharing an id makes a finding point at the wrong piece of paper, which is worse
-        than refusing the case.
+        Every later stage keys on `document_id`, so two documents sharing one makes a
+        finding point at the wrong piece of paper — worse than refusing the case.
         """
         counts = Counter(document.document_id for document in self.documents)
         duplicates = sorted(name for name, count in counts.items() if count > 1)
         if duplicates:
             raise ValueError(f'duplicate document ids in case {self.case_id}: {duplicates}')
         return self
-
-    @property
-    def total_bytes(self) -> int:
-        """How much file content this case is carrying, for the memory ceiling."""
-        return sum(len(d.content) for d in self.documents if d.content)
 
 
 class Classification(BaseModel):
@@ -148,9 +148,10 @@ class RoutedDocument:
 
     raw: RawDocument
     classification: Classification
+
     usage: TokenUsage = field(default_factory=TokenUsage)
     """What classifying this document cost, carried forward so the per-document total in
-    `ExtractedDocument` covers the whole branch, not just extraction."""
+    `ExtractedDocument` covers the whole branch rather than extraction alone."""
 
     @property
     def document_type(self) -> DocumentType:
@@ -159,19 +160,27 @@ class RoutedDocument:
 
 
 class ExtractedDocument(BaseModel):
-    """The output of one document's classify-then-extract branch."""
+    """The output of one document's classify-then-extract branch.
+
+    Always produced, even when nothing could be read: a document that failed carries its
+    reason in `error`, so the case still returns a result for every document submitted.
+    """
 
     document_id: str
+    """The id it was submitted under, so a caller can match this back to its upload."""
+
     document_type: DocumentType
     confidence: float
     classification_reasoning: str
-    filename: str | None = None
+    """The classifier's three fields, flattened — an examiner reviewing a finding wants
+    to see what the document was taken to be and how sure that was."""
 
+    filename: str | None = None
     page_count: int | None = None
-    """How many pages were read, for a caller showing what it processed."""
 
     payload: ExtractionPayload | None = None
-    """`None` when the document was unclassifiable or extraction failed."""
+    """The typed fields, under the schema for this document's family. `None` when the
+    document was unclassifiable or extraction failed."""
 
     error: str | None = None
     """Why `payload` is `None`, when it is."""

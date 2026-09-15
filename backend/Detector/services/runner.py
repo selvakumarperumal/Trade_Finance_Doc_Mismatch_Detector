@@ -14,6 +14,8 @@ an overload becomes an unbounded backlog in which every caller waits and none is
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections.abc import AsyncIterator
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Final
@@ -26,12 +28,13 @@ from pydantic_ai.exceptions import (
 )
 
 from Detector.core.config import Settings, get_settings
-from Detector.core.observability import span
 from Detector.models.documents import CaseInput
 from Detector.models.jobs import CaseRecord
 from Detector.services.deps import StageEvent
 from Detector.services.pipeline import DetectorPipeline
 from Detector.services.store import CaseNotFound, CaseStore
+
+logger = logging.getLogger(__name__)
 
 SHUTDOWN_GRACE_SECONDS: Final = 10.0
 """How long a shutting-down process waits for running cases before cancelling them."""
@@ -45,8 +48,12 @@ class TooBusy(Exception):
 class CaseRunner:
     """Accepts cases, runs them against the pipeline, records what happens.
 
-    It owns the set of in-flight tasks, so it has a lifecycle: `aclose()` is what the
-    FastAPI lifespan calls on the way out.
+    This is the only object the API layer talks to. It owns the store cases are collected
+    from, so `submit`, `get`, `watch` and `discard` between them cover everything a route
+    needs and nothing above has to know where a record is kept.
+
+    It also owns the set of in-flight tasks, so it has a lifecycle: `aclose()` is what
+    the FastAPI lifespan calls on the way out.
     """
 
     pipeline: DetectorPipeline
@@ -87,7 +94,7 @@ class CaseRunner:
         """Accept a case and return its record straight away.
 
         The record is `queued`; the run continues on a background task. Follow it with
-        `store.watch(case_id)`, or by polling `store.get(case_id)`.
+        `watch(case_id)`, or by polling `get(case_id)`.
 
         Raises:
             TooBusy: too many submissions are already waiting for a slot.
@@ -109,6 +116,18 @@ class CaseRunner:
         task.add_done_callback(self._retire)
         return record
 
+    async def get(self, case_id: str) -> CaseRecord:
+        """Where a submitted case has got to."""
+        return await self.store.get(case_id)
+
+    def watch(self, case_id: str) -> AsyncIterator[CaseRecord]:
+        """Every version of a case's record, until it reaches a terminal state.
+
+        Not `async def`: `store.watch` is an async generator, so calling it already hands
+        back something to iterate, and awaiting here would only get in the way.
+        """
+        return self.store.watch(case_id)
+
     async def cancel(self, case_id: str) -> bool:
         """Stop a running case. Returns whether there was one to stop."""
         for task in tuple(self._tasks):
@@ -116,6 +135,17 @@ class CaseRunner:
                 task.cancel()
                 return True
         return False
+
+    async def discard(self, case_id: str) -> None:
+        """Give up on a case: stop it if it is running, then forget what it held.
+
+        Raises:
+            CaseNotFound: no such case, so the caller is told rather than being given a
+                silent success for an id that was never here.
+        """
+        await self.store.get(case_id)
+        await self.cancel(case_id)
+        await self.store.forget(case_id)
 
     async def aclose(self, grace: float = SHUTDOWN_GRACE_SECONDS) -> None:
         """Stop accepting cases, let the running ones finish, then cancel the rest.
@@ -145,8 +175,7 @@ class CaseRunner:
         """
         self._tasks.discard(task)
         if not task.cancelled() and (exception := task.exception()) is not None:
-            with span('case task failed unexpectedly: {error}', error=repr(exception)):
-                pass
+            logger.error('case task failed unexpectedly: %r', exception)
 
     async def _run(self, case: CaseInput) -> None:
         """Wait for a slot, run the case, and record the outcome exactly once."""

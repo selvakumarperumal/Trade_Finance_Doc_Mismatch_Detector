@@ -1,32 +1,16 @@
-"""The model layer: OCR, agents, the graph that orchestrates them, and the facade."""
+"""The model layer: OCR, agents, the graph that orchestrates them, and the facade.
 
-from Detector.services.agents import AgentRegistry, build_agents, get_agents
-from Detector.services.deps import CaseState, DetectorDeps, StageEvent
-from Detector.services.graph import case_graph, render_mermaid
-from Detector.services.ocr import OcrError, ReadResult, TextractOCR, textract_client
-from Detector.services.pipeline import DetectorPipeline, ProgressCallback, get_pipeline
-from Detector.services.runner import CaseRunner, TooBusy
-from Detector.services.store import CaseExists, CaseNotFound, CaseStore
+Import from the module that defines what you need:
 
-__all__ = [
-    'AgentRegistry',
-    'CaseExists',
-    'CaseNotFound',
-    'CaseRunner',
-    'CaseState',
-    'CaseStore',
-    'DetectorDeps',
-    'DetectorPipeline',
-    'OcrError',
-    'ProgressCallback',
-    'ReadResult',
-    'StageEvent',
-    'TextractOCR',
-    'TooBusy',
-    'build_agents',
-    'case_graph',
-    'get_agents',
-    'get_pipeline',
-    'render_mermaid',
-    'textract_client',
-]
+    pipeline.py  DetectorPipeline — hand it a CaseInput, get a CaseResult back
+    runner.py    CaseRunner — runs cases in the background, and says no when full
+    store.py     CaseStore — where a case lives between the 202 and its collection
+    graph.py     the Pydantic Graph itself: ingest, fan out, classify, extract, reconcile
+    agents.py    the Pydantic AI agents, built once and shared
+    ocr.py       Textract, one page at a time
+    deps.py      what every graph node is handed: agents, settings, per-case state
+
+Nothing here imports FastAPI, which is why the same engine serves the API, the notebook
+and the tests. This package re-exports nothing on purpose — the module name is the
+better address.
+"""

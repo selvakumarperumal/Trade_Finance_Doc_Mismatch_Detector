@@ -2,21 +2,17 @@
 
 `DetectDocumentText` is Textract's synchronous read: hand it the bytes of a page, get
 back blocks of lines and words, with no job to submit and poll. The bytes travel inline
-in the request and are dropped as soon as the text comes back, so the pipeline stores
-nothing.
+in the request and are dropped as soon as the text comes back, so nothing is stored.
 
-The price of that is Textract's synchronous limits: **one page**, 10 MB per call. A
-presentation is not single pages — a letter of credit runs to three or four, a bill of
-lading to two — so a multi-page PDF is split here, one call per page, and the text is
-rejoined in page order. The alternative, `StartDocumentTextDetection`, reads a whole PDF
-but only from an S3 bucket, which means a bucket, a lifecycle policy and a place where
-the documents come to rest. Splitting keeps the bytes in memory and the deployment to
-one service.
+The price is Textract's synchronous limits: **one page**, 10 MB per call. A letter of
+credit runs to three or four pages, so a multi-page PDF is split here, one call per page,
+and the text rejoined in page order. The alternative, `StartDocumentTextDetection`, reads
+a whole PDF but only from an S3 bucket — which means a bucket, a lifecycle policy, and a
+place where the documents come to rest. Splitting keeps the bytes in memory.
 
-Two objects, because they have two lifetimes. `textract_client()` opens the aioboto3
-client, which owns a connection pool and wants to live as long as the process.
-`TextractOCR` pairs that client with the semaphore that decides how many pages may be
-read at once, which is a per-deployment policy.
+Two objects, because they have two lifetimes: `textract_client()` opens the aioboto3
+client, which owns a connection pool and lives as long as the process, while
+`TextractOCR` pairs it with the semaphore capping how many pages are read at once.
 """
 
 from __future__ import annotations
@@ -234,14 +230,3 @@ class TextractOCR:
             block['Text'] for block in response['Blocks'] if block['BlockType'] == 'LINE'
         )
 
-
-__all__ = [
-    'PDF_MEDIA_TYPE',
-    'SUPPORTED_MEDIA_TYPES',
-    'OcrError',
-    'ReadResult',
-    'TextractOCR',
-    'sniff_media_type',
-    'split_pdf_pages',
-    'textract_client',
-]

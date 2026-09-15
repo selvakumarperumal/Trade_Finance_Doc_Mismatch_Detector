@@ -11,12 +11,13 @@ submitting a case and collecting its answer are two separate acts.
 flowchart TD
     C["client"] -->|"POST /v1/cases/uploads"| RT["routes/cases.py"]
     C -->|"GET /v1/cases/{id}"| RT
-    C -->|"WS /v1/cases/{id}/stream"| RT
+    C -->|"Socket.IO /socket.io"| EV["events.py<br/>subscribe · case · done · error"]
     C -->|"GET /health"| SY["routes/system.py"]
     RT --> DEP["dependencies.py<br/>RunnerDep, SettingsDep"]
     SY --> DEP
-    DEP -->|"off app.state"| RUN["services.CaseRunner"]
-    RUN --> STORE["services.CaseStore"]
+    EV -->|"off app.state"| RUN
+    DEP -->|"off app.state"| RUN["services.CaseRunner<br/>submit · get · watch · discard"]
+    RUN -.->|"owns, and keeps to itself"| STORE["services.CaseStore"]
     RT -.->|raises| ERR["errors.py<br/>code + detail, one shape"]
     APP["app.py — factory and lifespan"] -.->|builds once| RUN
 ```
@@ -25,7 +26,7 @@ flowchart TD
 |---|---|---|
 | `POST` | `/v1/cases/uploads` | Submit as PDFs or images → `202` |
 | `POST` | `/v1/cases` | Submit as already-extracted text → `202` |
-| `WS` | `/v1/cases/{id}/stream` | Watch it run |
+| `Socket.IO` | `/socket.io` | Watch it run — emit `subscribe` with the case id |
 | `GET` | `/v1/cases/{id}` | Poll it instead |
 | `DELETE` | `/v1/cases/{id}` | Abandon a case and drop what it held |
 | `GET` | `/health` | Liveness, OCR availability, cases in flight |
@@ -43,20 +44,33 @@ sequenceDiagram
     A->>A: validate — count, size, format
     A->>R: submit
     A-->>B: 202 CaseRecord, status queued
-    B->>A: WS /v1/cases/{id}/stream
-    A-->>B: CaseRecord (replays everything so far)
+    B->>A: Socket.IO connect, emit subscribe {case_id}
+    A-->>B: 'case' — CaseRecord (replays everything so far)
     loop as each stage completes
-        A-->>B: CaseRecord (whole snapshot, not a delta)
+        A-->>B: 'case' — CaseRecord (whole snapshot, not a delta)
     end
-    A-->>B: CaseRecord, status succeeded, result set
-    Note over B,A: socket closes on a terminal status
+    A-->>B: 'case' — status succeeded, result set
+    A-->>B: 'done' — terminal status, no more case events
 ```
+
+### The five files
+
+| File | What it holds |
+|---|---|
+| `app.py` | the app factory and the lifespan that builds the runner |
+| `dependencies.py` | `RunnerDep` and `SettingsDep`, read off `app.state` |
+| `errors.py` | one error shape, and the four handlers that produce it |
+| `events.py` | the Socket.IO server: subscribe to a case, get it pushed |
+| `routes/` | `cases.py` — submit, poll, delete; `system.py` — `/health` |
 
 ---
 
 ## `routes/cases.py`
 
 ### Submitting
+
+Each route body is short on purpose: check nothing itself, build a `CaseInput`, hand it
+to the runner.
 
 ```python
 @router.post(
@@ -79,21 +93,7 @@ async def submit_uploads(
     Nothing is written to disk or to a bucket — the bytes live in memory until the
     document has been read, then are dropped.
     """
-    _check_count(files, settings)
-
-    documents: list[RawDocument] = []
-    remaining = settings.max_case_bytes
-    for index, upload in enumerate(files, start=1):
-        content = await _read_upload(upload, index, settings, budget=remaining)
-        remaining -= len(content)
-        documents.append(
-            RawDocument(
-                document_id=f'doc-{index}',
-                filename=upload.filename,
-                content=content,
-            )
-        )
-
+    documents = await _read_uploads(files, settings)
     return await runner.submit(
         CaseInput(
             case_id=case_id or new_case_id(),
@@ -103,8 +103,33 @@ async def submit_uploads(
     )
 ```
 
-`remaining` is the case-wide budget, threaded through the loop so each file is checked
-against what is actually left rather than against the per-file limit alone.
+Reading the files is the one piece of real work in this layer, so it lives in its own
+function at the bottom of the module rather than in the route:
+
+```python
+async def _read_uploads(files: list[UploadFile], settings: Settings) -> list[RawDocument]:
+    """Read every uploaded file into memory, refusing what cannot be used."""
+    _check_count(files, settings)
+
+    documents: list[RawDocument] = []
+    remaining = settings.max_case_bytes
+    for index, upload in enumerate(files, start=1):
+        limit = min(settings.max_document_bytes, remaining)
+        content = await _read_upload(upload, settings, limit=limit)
+        remaining -= len(content)
+        documents.append(
+            RawDocument(
+                document_id=f'doc-{index}',
+                filename=upload.filename,
+                content=content,
+            )
+        )
+    return documents
+```
+
+`remaining` is the case-wide budget threaded through the loop, so each file is measured
+against what is actually left rather than against the per-file limit alone. `limit` — the
+smaller of the two — is the only number `_read_upload` needs.
 
 ### Refusing early
 
@@ -115,7 +140,7 @@ flowchart TD
     U["multipart upload"] --> C1{"any files?<br/>at most max_documents_per_case?"}
     C1 -->|no| E1["422 invalid_case<br/>before a single byte is read"]
     C1 -->|yes| RD["read in 1 MB chunks"]
-    RD --> C2{"still under the per-file<br/>and per-case budgets?"}
+    RD --> C2{"still under limit —<br/>per-file and what's left of the case?"}
     C2 -->|no| E2["413 upload_too_large<br/>part-way through, not after"]
     C2 -->|yes| C3{"empty?"}
     C3 -->|yes| E3["422 invalid_case"]
@@ -132,33 +157,29 @@ def _check_count(files: list[UploadFile], settings: Settings) -> None:
     file has already been read into memory first.
     """
     if not files:
-        raise UploadRejected(
-            'no files were uploaded',
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            code='invalid_case',
-        )
+        raise UploadRejected('no files were uploaded')
     if len(files) > settings.max_documents_per_case:
         raise UploadRejected(
             f'{len(files)} files were uploaded, above the limit of '
-            f'{settings.max_documents_per_case} documents per case',
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            code='invalid_case',
+            f'{settings.max_documents_per_case} documents per case'
         )
 ```
+
+`UploadRejected` defaults to `422 invalid_case`, so the ordinary refusal is one line and
+only the two that need a different status say so.
 
 Reading in chunks is what lets the case-wide limit be enforced *while* the bytes arrive:
 
 ```python
-    label = upload.filename or f'file {index}'
-    ceiling = min(settings.max_document_bytes, max(budget, 0))
+    name = upload.filename or 'an unnamed file'
 
     chunks: list[bytes] = []
     size = 0
     while chunk := await upload.read(UPLOAD_CHUNK_BYTES):
         size += len(chunk)
-        if size > ceiling:
+        if size > limit:
             raise UploadRejected(
-                f'{label} is larger than the {ceiling} bytes still available for this case '
+                f'{name} is larger than the {limit} bytes still available for this case '
                 f'(per-file limit {settings.max_document_bytes}, '
                 f'per-case limit {settings.max_case_bytes})',
                 status_code=status.HTTP_413_CONTENT_TOO_LARGE,
@@ -170,47 +191,76 @@ Reading in chunks is what lets the case-wide limit be enforced *while* the bytes
 And the format comes from the bytes, never from the header the browser sent:
 
 ```python
+    content = b''.join(chunks)
+    if not content:
+        raise UploadRejected(f'{name} is empty')
     if sniff_media_type(content) is None:
         raise UploadRejected(
-            f'{label} is not a document this service can read; accepted types are '
+            f'{name} is not a document this service can read; accepted types are '
             f'{", ".join(sorted(SUPPORTED_MEDIA_TYPES))}, and the bytes match none of them '
             f'(the browser called it {upload.content_type or "nothing in particular"})',
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             code='unsupported_media_type',
         )
+    return content
 ```
 
-### Streaming
+### Streaming — `events.py`
 
-The whole websocket handler, because there is not much to it:
+Socket.IO rather than a bare WebSocket, so clients get reconnection, acknowledgements and
+named events for free. It is a separate ASGI app, mounted rather than routed:
 
 ```python
-@router.websocket('/{case_id}/stream')
-async def stream_case(case_id: str, websocket: WebSocket, runner: RunnerDep) -> None:
-    """Watch a submitted case run.
+    app.mount(MOUNT_PATH, build_socket_app(app, settings.cors_origins))
+```
 
-    Connect with the id the submission returned. Each message is a complete `CaseRecord`
-    — the same shape `GET /v1/cases/{case_id}` returns — sent on every change, so there
-    is no race between the POST returning and the socket opening, and a reconnect needs
-    no cursor. The stream ends when `status` is terminal.
-    """
-    await websocket.accept()
+| Event | Direction | Payload |
+|---|---|---|
+| `subscribe` | client → server | `{case_id}` — start streaming that case |
+| `unsubscribe` | client → server | `{case_id}` — stop; disconnecting also stops it |
+| `case` | server → client | the whole `CaseRecord`, on subscribe and after every change |
+| `done` | server → client | `{case_id}` — terminal status, no more `case` events |
+| `error` | server → client | `{code, detail}` — the same codes the HTTP layer uses |
+
+The pumping itself takes the transport as a parameter, which is what keeps it testable
+without a Socket.IO server in the way:
+
+```python
+async def stream_case(runner: CaseRunner, case_id: str, emit: Emit) -> None:
+    """Push every version of one case's record through `emit`, until it is terminal."""
     try:
-        async for record in runner.store.watch(case_id):
-            await websocket.send_text(record.model_dump_json())
+        async for record in runner.watch(case_id):
+            await emit(CASE, record.model_dump(mode='json'))
+        await emit(DONE, {'case_id': case_id})
     except CaseNotFound as exc:
-        await websocket.send_json({'code': 'case_not_found', 'detail': str(exc)})
-    except WebSocketDisconnect:
-        return  # The client went away; nothing to report to.
-    finally:
-        # The client may already have gone, which closing again would complain about.
-        with suppress(RuntimeError):
-            await websocket.close()
+        await emit(ERROR, {'code': 'case_not_found', 'detail': str(exc)})
+    except asyncio.CancelledError:
+        raise  # The client went away, or the server is shutting down.
+    except Exception as exc:  # noqa: BLE001 - a subscription must not kill the connection
+        logger.exception('streaming case %s failed', case_id)
+        await emit(ERROR, {'code': 'internal_error', 'detail': f'{type(exc).__name__}: {exc}'})
 ```
 
 Because re-sending complete state is idempotent, that one decision removes a surprising
 amount: no tagged message union to switch on, no event accumulation on the client, no
 sequence numbers, and no resume cursor.
+
+One task per subscription does the pumping, and a client may hold several at once. They
+are tracked per session so a disconnect cancels them, rather than leaving tasks emitting
+into a socket nobody is reading:
+
+```python
+    @server.event
+    async def disconnect(sid: str) -> None:
+        """Cancel everything this client was watching."""
+        for task in streams.pop(sid, {}).values():
+            task.cancel()
+```
+
+Two mount details are easy to get wrong, so both carry a comment in the code:
+`socketio_path=''` because Starlette strips the prefix before the sub-app sees the
+request, and `cors_allowed_origins` because FastAPI's `CORSMiddleware` never sees
+requests that land inside a mount.
 
 ### Deleting
 
@@ -222,11 +272,14 @@ async def delete_case(case_id: str, runner: RunnerDep) -> Response:
     details, amounts — so a caller that has collected its result can have it dropped now
     rather than waiting for the retention window.
     """
-    await runner.store.get(case_id)  # 404 rather than a silent success on an unknown id.
-    await runner.cancel(case_id)
-    await runner.store.forget(case_id)
+    await runner.discard(case_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 ```
+
+`discard` is the runner's, not the route's: stop the case if it is running, then forget
+what it held, and raise `CaseNotFound` rather than quietly succeeding on an id that was
+never here. **Nothing in `api/` mentions the store** — the runner is the only object this
+layer talks to.
 
 ---
 
@@ -250,8 +303,41 @@ flowchart LR
     ASYNC -.->|"same vocabulary,<br/>read from GET /v1/cases/{id}"| SYNC
 ```
 
-Five handlers, because a case is analysed on a background task long after its submission
-returned — a model failure has no request left to answer:
+A case is analysed on a background task long after its submission returned, so a model
+failure has no request left to answer. That leaves four handlers, each a plain module-level
+function of two or three lines:
+
+```python
+async def _case_not_found(request: Request, exc: Exception) -> JSONResponse:
+    """Unknown id, or one that finished long enough ago to have expired."""
+    return _error(status.HTTP_404_NOT_FOUND, 'case_not_found', str(exc))
+
+
+async def _case_exists(request: Request, exc: Exception) -> JSONResponse:
+    """Nothing is malformed; the id just collides. `DELETE` frees it."""
+    return _error(status.HTTP_409_CONFLICT, 'case_exists', str(exc))
+
+
+async def _invalid_case(request: Request, exc: Exception) -> JSONResponse:
+    """A presentation the API will not take."""
+    return _error(
+        getattr(exc, 'status_code', status.HTTP_422_UNPROCESSABLE_CONTENT),
+        getattr(exc, 'code', 'invalid_case'),
+        str(exc),
+    )
+
+
+async def _too_busy(request: Request, exc: Exception) -> JSONResponse:
+    """Shed the load rather than accept a case and sit on it."""
+    return _error(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        'server_busy',
+        f'the detector is at capacity: {exc}',
+        **{'Retry-After': str(RETRY_AFTER_SECONDS)},
+    )
+```
+
+Registration is then a flat list, and the file reads top to bottom with no nesting:
 
 ```python
 def register_error_handlers(app: FastAPI) -> None:
@@ -260,30 +346,16 @@ def register_error_handlers(app: FastAPI) -> None:
     Starlette resolves a handler by walking the exception's MRO, so the specific ones win
     over `ValueError` and registration order does not matter.
     """
-
-    async def unknown_case(request: Request, exc: Exception) -> JSONResponse:
-        """Unknown id, or one that finished long enough ago to have expired."""
-        return _error(status.HTTP_404_NOT_FOUND, 'case_not_found', str(exc))
-
-    async def case_exists(request: Request, exc: Exception) -> JSONResponse:
-        """Nothing is malformed; the id just collides. `DELETE` frees it."""
-        return _error(status.HTTP_409_CONFLICT, 'case_exists', str(exc))
-
-    async def too_busy(request: Request, exc: Exception) -> JSONResponse:
-        """Shed the load rather than accept a case and sit on it."""
-        return _error(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            'server_busy',
-            f'the detector is at capacity: {exc}',
-            **{'Retry-After': str(RETRY_AFTER_SECONDS)},
-        )
-
-    app.add_exception_handler(CaseNotFound, unknown_case)
-    app.add_exception_handler(CaseExists, case_exists)
-    app.add_exception_handler(UploadRejected, upload_rejected)
-    app.add_exception_handler(ValueError, invalid_case)
-    app.add_exception_handler(TooBusy, too_busy)
+    app.add_exception_handler(CaseNotFound, _case_not_found)
+    app.add_exception_handler(CaseExists, _case_exists)
+    app.add_exception_handler(UploadRejected, _invalid_case)
+    app.add_exception_handler(ValueError, _invalid_case)
+    app.add_exception_handler(TooBusy, _too_busy)
 ```
+
+Five registrations, four handlers: `UploadRejected` **is** a `ValueError`, so the same
+handler answers both — it just reads `status_code` and `code` off the exception when they
+are there. Listing it anyway says out loud that it is handled here on purpose.
 
 One error shape for the whole API:
 
@@ -298,18 +370,20 @@ class ErrorResponse(BaseModel):
 ```
 
 `UploadRejected` is a `ValueError` carrying its own status, so anything that fails to
-catch it still becomes a 422 rather than a 500:
+catch it still becomes a 422 rather than a 500 — and the defaults mean most refusals are
+`raise UploadRejected('...')` and nothing more:
 
 ```python
 class UploadRejected(ValueError):
-    """An upload the API will not accept, carrying the status it should leave as.
+    """An upload the API will not accept, carrying the status it should leave as."""
 
-    A `ValueError`, so anything that fails to catch it still becomes a 422 rather than a
-    500 — but with its own status, because 'too big' (413) and 'not a format we read'
-    (415) tell a client what to change and a flat 422 does not.
-    """
-
-    def __init__(self, detail: str, *, status_code: int, code: str) -> None:
+    def __init__(
+        self,
+        detail: str,
+        *,
+        status_code: int = status.HTTP_422_UNPROCESSABLE_CONTENT,
+        code: str = 'invalid_case',
+    ) -> None:
         super().__init__(detail)
         self.status_code = status_code
         self.code = code
@@ -317,19 +391,20 @@ class UploadRejected(ValueError):
 
 ---
 
-## `dependencies.py` — one dependency
+## `dependencies.py` — two dependencies, one object
 
 One object leads to the rest: the runner owns the store cases are collected from and the
 pipeline they run through.
 
 ```python
-def get_runner(connection: HTTPConnection) -> CaseRunner:
+def get_runner(request: Request) -> CaseRunner:
     """The runner cases are submitted to, or a 503 while the app is still starting.
 
-    `HTTPConnection` is the base of both `Request` and `WebSocket`, so this serves the
-    routes and the progress stream alike.
+    Only the HTTP routes go through here. The Socket.IO handlers in `api/events.py` read
+    the same `app.state.runner` themselves, because they are not FastAPI endpoints and
+    have no dependency injection to hang this on.
     """
-    runner = getattr(connection.app.state, 'runner', None)
+    runner = getattr(request.app.state, 'runner', None)
     if not isinstance(runner, CaseRunner):  # pragma: no cover - only if the lifespan did not run
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -347,9 +422,9 @@ singleton read from the environment, and an app built with an explicit `Settings
 then validate uploads against limits it was never given:
 
 ```python
-def get_app_settings(connection: HTTPConnection) -> Settings:
+def get_app_settings(request: Request) -> Settings:
     """The settings *this app* was built with."""
-    settings = getattr(connection.app.state, 'settings', None)
+    settings = getattr(request.app.state, 'settings', None)
     return settings if isinstance(settings, Settings) else get_settings()
 ```
 
@@ -360,13 +435,12 @@ def get_app_settings(connection: HTTPConnection) -> Settings:
 ```mermaid
 flowchart TD
     subgraph START["startup, in this order"]
-        S1["configure Logfire<br/>so the rest of startup is traced"]
-        S2["load prompts<br/>a typo fails here, not on request 1"]
-        S3["open the Textract client<br/>allowed to fail"]
-        S4["build the runner"]
-        S1 --> S2 --> S3 --> S4
+        S1["load prompts<br/>a typo fails here, not on request 1"]
+        S2["open the Textract client<br/>allowed to fail"]
+        S3["build the runner"]
+        S1 --> S2 --> S3
     end
-    S4 --> SERVE["serving"]
+    S3 --> SERVE["serving"]
     SERVE --> D1["stop accepting cases"]
     D1 --> D2["let running ones finish, up to the grace period"]
     D2 --> D3["cancel the rest — and record them as cancelled"]
@@ -382,23 +456,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     an explicit `Settings` really does start up under that configuration.
     """
     settings: Settings = getattr(app.state, 'settings', None) or get_settings()
-    configure_observability(settings)
     get_prompts()
 
     async with AsyncExitStack() as stack:
         pipeline = await _open_pipeline(stack, settings)
-        runner = CaseRunner.build(pipeline, CaseStore(settings), settings)
-        # Registered before the yield so it runs before the Textract client closes:
-        # a case still being read needs the client alive to finish or to fail cleanly.
+        runner = CaseRunner.build(pipeline, settings=settings)
+        # The stack unwinds in reverse, so registering this last means the runner closes
+        # first: a case still being read keeps a live Textract client to finish or fail
+        # with, rather than losing it mid-document.
         stack.push_async_callback(runner.aclose)
 
         app.state.runner = runner
         yield
 ```
 
-The callback ordering is the subtle part: `AsyncExitStack` unwinds in reverse, so
-registering `runner.aclose` *after* the Textract client means the runner is closed
-*first* — and a case still being read still has a live client to finish or fail with.
+The callback ordering is the subtle part, which is why it carries the only comment in the
+function: `AsyncExitStack` unwinds in reverse, so registering `runner.aclose` *after* the
+Textract client means the runner is closed *first*.
 
 **OCR is the one part allowed to fail at startup.** A deployment that only ever receives
 extracted text has no reason to hold AWS credentials:
@@ -411,8 +485,8 @@ async def _open_pipeline(stack: AsyncExitStack, settings: Settings) -> DetectorP
     try:
         return await stack.enter_async_context(DetectorPipeline.open(settings))
     except (BotoCoreError, ClientError) as exc:
-        with span('textract unavailable, continuing without OCR: {reason}', reason=str(exc)):
-            return DetectorPipeline.default(settings)
+        logger.warning('Textract unavailable, continuing without OCR: %s', exc)
+        return DetectorPipeline.default(settings)
 ```
 
 Anything still running when the grace period expires is cancelled and *recorded* as

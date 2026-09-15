@@ -2190,7 +2190,7 @@ decision does not cover. That is the §5 design paying for itself.
 | [`Config/prompts.yaml`](Config/prompts.yaml) | §8, editable without a deploy |
 
 The production package adds what a notebook has no room for: a shared concurrency
-limiter across all stages, per-run usage and cost budgets, Logfire tracing, and
+limiter across all stages, per-run usage and cost budgets, and
 persistence. The architecture in this notebook is unchanged by any of it.
 
 
