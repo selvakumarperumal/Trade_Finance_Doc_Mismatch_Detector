@@ -11,7 +11,7 @@ as bytes; that is what the FastAPI lifespan uses.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import lru_cache
@@ -40,7 +40,7 @@ class DetectorPipeline:
 
     @classmethod
     @asynccontextmanager
-    async def open(cls, settings: Settings | None = None) -> AsyncIterator[DetectorPipeline]:
+    async def open(cls, settings: Settings | None = None) -> AsyncGenerator[DetectorPipeline]:
         """A pipeline with OCR, for as long as the block runs.
 
         The Textract client owns a connection pool, so it is opened once here and shared

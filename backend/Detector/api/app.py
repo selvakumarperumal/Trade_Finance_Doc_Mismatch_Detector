@@ -21,7 +21,7 @@ watching a case that will never change.
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack, asynccontextmanager
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -71,7 +71,7 @@ async def _open_pipeline(stack: AsyncExitStack, settings: Settings) -> DetectorP
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Build everything the routes need once, and tear it down on the way out.
 
     The settings come off `app.state`, where `create_app` put them, so an app built with

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from io import BytesIO
@@ -71,7 +71,7 @@ class ReadResult:
 
 
 @asynccontextmanager
-async def textract_client(settings: Settings | None = None) -> AsyncIterator[Any]:
+async def textract_client(settings: Settings | None = None) -> AsyncGenerator[Any]:
     """Open one Textract client, and close it again when the block exits.
 
     Open it once, where the process starts up — a client per page would pay TLS setup on
