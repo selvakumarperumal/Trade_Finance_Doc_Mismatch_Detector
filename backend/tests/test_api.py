@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from Detector.api.app import create_app
+from Detector.core.config import Settings
 from tests.conftest import PNG, StubTextract, make_pdf
 
 TERMINAL = {'succeeded', 'failed', 'cancelled'}
@@ -167,3 +170,32 @@ def test_health_reports_whether_scans_can_be_read(client: TestClient) -> None:
     body = client.get('/health').json()
     assert body['status'] == 'ok'
     assert body['ocr_available'] is True
+
+
+# --- serving a frontend from the same origin ---------------------------------
+
+
+def test_no_frontend_is_served_unless_one_is_configured(client: TestClient) -> None:
+    """The default is API-only, so `/` is not a page."""
+    assert client.get('/').status_code == 404
+
+
+def test_a_configured_frontend_is_served_without_shadowing_the_api(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """The static mount goes on last, so the API keeps every path it already had."""
+    (tmp_path / 'index.html').write_text('<h1>detector</h1>')
+    (tmp_path / 'app.js').write_text('export const ok = true;')
+
+    with TestClient(create_app(settings.model_copy(update={'frontend_dir': tmp_path}))) as client:
+        index = client.get('/')
+        assert index.status_code == 200
+        assert 'detector' in index.text
+
+        # Served as a module-capable type, or the browser refuses to import it.
+        assert client.get('/app.js').headers['content-type'].startswith('text/javascript')
+
+        # And none of the API moved.
+        assert client.get('/health').json()['status'] == 'ok'
+        assert client.get('/v1/cases/ghost').json()['code'] == 'case_not_found'
+        assert client.post('/v1/cases', json={'documents': [{'text': 'INVOICE'}]}).status_code == 202

@@ -1,0 +1,16 @@
+@page { size: A4; margin: 18mm 16mm; }
+body { font: 10.5pt/1.5 "DejaVu Sans Mono", monospace; color: #111; }
+h1 { font-size: 13pt; letter-spacing: .06em; text-align: center; margin: 0 0 4mm; }
+.rule { border-top: 2px solid #111; margin: 3mm 0 5mm; }
+.thin { border-top: 1px solid #999; margin: 4mm 0; }
+table { width: 100%; border-collapse: collapse; }
+/* Values are short and any real line break is an explicit <br>, so never let a field
+   wrap mid-token: a credit number split across two lines is a field an extractor can
+   misread. The grid tables hold prose and opt back in. */
+td { vertical-align: top; padding: 1.1mm 6mm 1.1mm 0; white-space: nowrap; }
+td.k { width: 62mm; color: #333; white-space: nowrap; }
+table.grid td, table.grid th { border: 1px solid #555; padding: 2mm; font-size: 10pt; white-space: normal; }
+table.grid th { background: #eee; text-align: left; }
+.right { text-align: right; }
+.foot { margin-top: 8mm; font-size: 9pt; color: #444; }
+.break { page-break-before: always; }

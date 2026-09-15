@@ -113,15 +113,22 @@ export AWS_REGION=ap-south-1     # OCR; omit to run text-only
 docker compose up --build
 ```
 
-Or without Docker:
+Then open **http://localhost:8000** for the UI, or `/docs` for the interactive API docs.
+One service and one port: the backend serves the frontend, so the page, the REST routes
+and the Socket.IO endpoint are all on the same origin and there is no CORS to configure.
+
+Click **Load a sample presentation** to try it without hunting for documents — the sample
+has planted discrepancies, so a real run comes back `blocked`.
+
+Without Docker:
 
 ```bash
 cd backend
 uv sync
-uv run uvicorn main:app --reload
+DETECTOR_FRONTEND_DIR=../frontend/public uv run uvicorn main:app --reload
 ```
 
-Either way the interactive API docs are at http://localhost:8000/docs.
+Drop `DETECTOR_FRONTEND_DIR` to run API-only.
 
 ## The shape of the API
 
@@ -145,7 +152,7 @@ Every one of them answers with the same `CaseRecord`, so there is one shape to h
 |---|---|
 | [`backend/`](backend/README.md) | The service: FastAPI, the pipeline, the tests |
 | [`backend/Config/`](backend/Config/) | `prompts.yaml` — the system prompts, editable without a deploy |
-| `frontend/` | Not built yet |
+| [`frontend/`](frontend/README.md) | A page to click through — no build step, served by the backend |
 
 ## Reading the code
 
@@ -155,6 +162,7 @@ Every one of them answers with the same `CaseRecord`, so there is one shape to h
 | [`backend/Detector/ARCHITECTURE.md`](backend/Detector/ARCHITECTURE.md) | How it works, upload to result |
 | [`backend/WALKTHROUGH.md`](backend/WALKTHROUGH.md) | One real case followed end to end |
 | [`backend/mini_detector.ipynb`](backend/mini_detector.ipynb) | A runnable miniature of the pipeline, built from scratch |
+| [`frontend/README.md`](frontend/README.md) | The page, and the Socket.IO contract it demonstrates |
 
 Each package under `backend/Detector/` also has its own README covering that layer:
 [`core/`](backend/Detector/core/README.md), [`models/`](backend/Detector/models/README.md),

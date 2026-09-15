@@ -8,14 +8,21 @@ services:
     environment:
       # The Google provider reads either name; this repo sets GEMINI_API_KEY in .envrc.
       - GEMINI_API_KEY=${GEMINI_API_KEY:?set GEMINI_API_KEY in your environment}
-      # OCR. Leave unset to run text-only: the service starts either way and reports
-      # ocr_available:false on /health.
-      - AWS_REGION=${AWS_REGION:-}
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      # OCR. Passed through from the host, where they are already set. Leave them unset
+      # to run text-only: the service starts either way, logs why, reports
+      # ocr_available:false on /health, and the page says so too.
+      - AWS_REGION
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      # Serve the frontend from this same service. One origin for the page, the REST
+      # routes and the Socket.IO endpoint means no CORS to configure and no second
+      # container to run. Unset this to go back to an API-only deployment.
+      - DETECTOR_FRONTEND_DIR=/frontend
     ports:
       - "8000:8000"
     volumes:
       - ./backend:/app
+      # Read-only: the service serves these files, it never writes them.
+      - ./frontend/public:/frontend:ro
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=* --reload
     restart: always

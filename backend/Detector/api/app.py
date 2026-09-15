@@ -27,6 +27,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from Detector.api.errors import register_error_handlers
 from Detector.api.events import MOUNT_PATH, build_socket_app
@@ -123,4 +124,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # included — and it does its own origin check, because the CORS middleware above
     # never sees requests that land inside a mount.
     app.mount(MOUNT_PATH, build_socket_app(app, settings.cors_origins))
+
+    # Last, because a mount at '/' matches anything the routes above did not: the API
+    # keeps its paths and the frontend gets everything else. `html=True` serves
+    # index.html for '/' and falls back to it for unknown paths.
+    if settings.frontend_dir is not None and settings.frontend_dir.is_dir():
+        app.mount('/', StaticFiles(directory=settings.frontend_dir, html=True), name='frontend')
+
     return app

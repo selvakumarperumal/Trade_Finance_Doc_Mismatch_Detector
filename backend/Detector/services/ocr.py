@@ -18,6 +18,7 @@ client, which owns a connection pool and lives as long as the process, while
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -77,10 +78,19 @@ async def textract_client(settings: Settings | None = None) -> AsyncIterator[Any
     every read. In FastAPI that means the lifespan handler; see `Detector.api.app`.
     """
     settings = settings or get_settings()
+
+    # botocore resolves a region from `AWS_DEFAULT_REGION`, never from `AWS_REGION` —
+    # yet `AWS_REGION` is the name Lambda and ECS set, and the one this project's docs
+    # and compose file ask for. Reading it here means a deployment that sets only
+    # `AWS_REGION` gets OCR instead of silently falling back to text-only. An explicit
+    # `DETECTOR_TEXTRACT_REGION` still wins, and `None` still leaves boto3 to its usual
+    # search of `AWS_DEFAULT_REGION` and the active profile.
+    region = settings.textract_region or os.environ.get('AWS_REGION')
+
     session = aioboto3.Session()
     async with session.client(
         'textract',
-        region_name=settings.textract_region,
+        region_name=region,
         config=BotoConfig(
             retries={'max_attempts': settings.textract_max_attempts, 'mode': 'adaptive'},
             max_pool_connections=max(settings.max_parallel_ocr_calls, 10),

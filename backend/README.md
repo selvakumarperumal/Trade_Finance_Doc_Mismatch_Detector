@@ -26,6 +26,10 @@ docker compose up --build
 
 Then open http://localhost:8000/docs.
 
+Set `DETECTOR_FRONTEND_DIR=../frontend/public` and the service also serves the page at
+`/` — same origin as the API, so no CORS is involved. `docker compose` does this for you.
+Leave it unset for an API-only deployment.
+
 ## The API
 
 Analysing a presentation takes minutes, so **submitting and collecting are separate**.

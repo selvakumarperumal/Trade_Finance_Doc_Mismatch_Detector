@@ -65,7 +65,7 @@ order a case meets them:
 4. **how much runs at once** — the four ceilings, each on a different resource
 5. **OCR** — the Textract client
 6. **holding a finished case** — how long a result stays collectable
-7. **api** — CORS
+7. **api** — CORS, and optionally serving a frontend
 
 ### The models, and why the stages differ
 
@@ -184,6 +184,21 @@ def get_settings() -> Settings:
     """The process-wide settings, read from the environment once."""
     return Settings()
 ```
+
+### Serving the frontend
+
+```python
+    frontend_dir: Path | None = None
+    """Serve a static frontend from `/`, for a deployment that has no separate web server.
+
+    Unset means the service is API-only. Set it and the page comes from the same origin
+    as the API, which is why the shipped frontend needs no CORS configuration at all."""
+```
+
+`create_app` mounts it **last**, so the API keeps its paths and the frontend gets
+everything else. That one setting is why `docker compose` is a single service.
+
+### Reading the settings
 
 Cached, so the environment is read once. The API also lets you build an app with an
 explicit `Settings` — which is what the tests do, and why `api/dependencies.py` reads

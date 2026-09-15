@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trade Finance Document Mismatch Detector</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>&#128203;</text></svg>">
+<link rel="stylesheet" href="styles.css">
+<script src="config.js"></script>
+</head>
+<body>
+<header>
+  <h1>Trade Finance Document Mismatch Detector</h1>
+  <p class="sub">Cross-checks a presentation under UCP 600 and reports what a bank would refuse.</p>
+  <p class="api">API <code id="api-base"></code> <span id="api-health" class="pill pill-idle">checking…</span></p>
+</header>
+
+<main>
+  <section class="panel" id="submit-panel">
+    <h2>1 · Present the documents</h2>
+
+    <div class="tabs" role="tablist">
+      <button class="tab is-active" data-mode="text" role="tab">As text</button>
+      <button class="tab" data-mode="files" role="tab">As scans</button>
+    </div>
+
+    <div class="mode" id="mode-text">
+      <p class="hint">
+        One document per box. Blank boxes are ignored, so three is just a starting point.
+      </p>
+      <div id="text-docs"></div>
+      <div class="row">
+        <button class="ghost" id="add-doc" type="button">+ Add another document</button>
+        <button class="ghost" id="load-sample" type="button">Load a sample presentation</button>
+        <button class="ghost" id="clear-docs" type="button">Clear</button>
+      </div>
+    </div>
+
+    <div class="mode is-hidden" id="mode-files">
+      <p class="hint">PDF, PNG, JPEG or TIFF — one file per document. Read with Textract.</p>
+      <input type="file" id="files" multiple accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff">
+      <p class="hint" id="ocr-warning"></p>
+    </div>
+
+    <div class="row">
+      <label for="presented-on">Presented to the bank on</label>
+      <input type="date" id="presented-on">
+      <span class="hint">Without it the Art 14(c) presentation-period check is skipped.</span>
+    </div>
+
+    <button id="submit" class="primary" type="button">Analyse the presentation</button>
+    <p class="error is-hidden" id="submit-error"></p>
+  </section>
+
+  <section class="panel" id="live-panel">
+    <h2>2 · Watch it run</h2>
+    <p class="hint" id="live-idle">Nothing submitted yet.</p>
+
+    <div class="is-hidden" id="live">
+      <div class="row case-line">
+        <code id="case-id"></code>
+        <span class="pill" id="job-status">queued</span>
+        <span class="hint" id="doc-count"></span>
+      </div>
+      <ol class="trail" id="trail"></ol>
+    </div>
+  </section>
+
+  <section class="panel is-hidden" id="report-panel">
+    <h2>3 · The verdict</h2>
+    <div class="verdict" id="verdict"></div>
+    <p id="summary"></p>
+    <div id="mismatches"></div>
+    <h3>Documents</h3>
+    <div id="documents"></div>
+    <details>
+      <summary>Raw <code>CaseRecord</code></summary>
+      <pre id="raw"></pre>
+    </details>
+  </section>
+</main>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

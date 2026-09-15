@@ -100,7 +100,7 @@ class Settings(BaseSettings):
     reports `ocr_available: false` and documents must arrive with their text extracted.
     """
 
-    textract_region: str | None = None  # `None` lets boto3 resolve it the usual way
+    textract_region: str | None = None  # unset falls back to AWS_REGION, then boto3's own search
     textract_max_attempts: int = 5  # botocore `adaptive` retries, which throttle the client too
 
     # --- holding a finished case ----------------------------------------------
@@ -118,7 +118,14 @@ class Settings(BaseSettings):
 
     cors_origins: list[str] = Field(default_factory=list)
     """Browser origins allowed to call the API, e.g. `['http://localhost:5173']`.
-    Empty means no CORS headers, which is right for a service behind a gateway."""
+    Empty means no CORS headers, which is right for a service behind a gateway — and for
+    `frontend_dir`, where the page is served from this origin anyway."""
+
+    frontend_dir: Path | None = None
+    """Serve a static frontend from `/`, for a deployment that has no separate web server.
+
+    Unset means the service is API-only. Set it and the page comes from the same origin
+    as the API, which is why the shipped frontend needs no CORS configuration at all."""
 
 
 @lru_cache(maxsize=1)

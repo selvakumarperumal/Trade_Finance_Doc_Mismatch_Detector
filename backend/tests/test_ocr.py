@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
+from Detector.core.config import Settings
 from Detector.services.ocr import (
     PDF_MEDIA_TYPE,
     OcrError,
     TextractOCR,
     sniff_media_type,
     split_pdf_pages,
+    textract_client,
 )
 from tests.conftest import PNG, StubTextract, make_pdf
 
@@ -92,3 +95,47 @@ async def test_the_bytes_decide_what_a_document_is(stub_textract: StubTextract) 
 async def test_empty_scan_is_reported_rather_than_passed_on() -> None:
     reader = TextractOCR(client=StubTextract(text='   '), limit=asyncio.Semaphore(4))
     assert (await reader.read(PNG)).is_empty
+
+
+# --- picking a region --------------------------------------------------------
+
+
+@pytest.fixture
+def no_aws_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cut boto3 off from every region source except the environment.
+
+    Without this the test passes on any machine that happens to have a region in
+    `~/.aws/config` — which is most developer machines, and none of CI. It would then
+    prove nothing, and the bug it guards would slip straight back in.
+    """
+    monkeypatch.setenv('AWS_CONFIG_FILE', str(tmp_path / 'absent-config'))
+    monkeypatch.setenv('AWS_SHARED_CREDENTIALS_FILE', str(tmp_path / 'absent-credentials'))
+    for name in ('AWS_DEFAULT_REGION', 'AWS_PROFILE', 'AWS_REGION'):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.mark.asyncio
+async def test_aws_region_is_honoured_even_though_botocore_ignores_it(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, no_aws_config: None
+) -> None:
+    """botocore reads AWS_DEFAULT_REGION, not AWS_REGION.
+
+    AWS_REGION is what Lambda, ECS and this project's own compose file set, so a
+    deployment that exports only that one must still get a working client rather than
+    silently dropping to text-only.
+    """
+    monkeypatch.setenv('AWS_REGION', 'ap-south-1')
+
+    async with textract_client(settings) as client:
+        assert client.meta.region_name == 'ap-south-1'
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_setting_beats_the_environment(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, no_aws_config: None
+) -> None:
+    monkeypatch.setenv('AWS_REGION', 'ap-south-1')
+    configured = settings.model_copy(update={'textract_region': 'eu-west-2'})
+
+    async with textract_client(configured) as client:
+        assert client.meta.region_name == 'eu-west-2'
