@@ -28,5 +28,14 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "strict"
 addopts = "-q"
+
+# Async tests are opted into with @pytest.mark.asyncio rather than picked up by name.
+asyncio_mode = "strict"
+
+# Both scopes are set explicitly because pytest-asyncio deprecates leaving them unset:
+# it is changing the fixture default from "fixture" to "function", and warns until you
+# say which you want. "function" is that coming default and what this suite already
+# assumes — every test gets a fresh event loop, so no state leaks between them.
+asyncio_default_fixture_loop_scope = "function"
+asyncio_default_test_loop_scope = "function"
